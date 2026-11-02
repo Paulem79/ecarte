@@ -4,9 +4,7 @@
 #   ./install.sh --force    réinstalle même si déjà à jour
 #   ./install.sh --uninstall
 #
-# Dépôt privé : fournir l'accès par l'une de ces méthodes
-#   - gh (GitHub CLI) connecté : `gh auth login`
-#   - variable GITHUB_TOKEN / GH_TOKEN, ou fichier ~/.config/ecarte/token (jeton avec lecture "Contents")
+# Dépôt public : aucun jeton requis (GITHUB_TOKEN / GH_TOKEN / gh restent utilisables en secours).
 set -eu
 
 REPO="Paulem79/ecarte"
@@ -98,9 +96,7 @@ fetch_with_curl() {
 
 say "Recherche de la dernière version…"
 if ! fetch_with_gh && ! fetch_with_curl; then
-  die "impossible de lire les releases de $REPO (réseau coupé, ou dépôt privé sans accès).
-Connectez-vous avec :  gh auth login
-ou placez un jeton dans ${TOKEN_FILE}  (chmod 600), ou exportez GITHUB_TOKEN."
+  die "impossible de lire les releases de $REPO (pas de connexion Internet ?)."
 fi
 
 if [ "$FORCE" = 0 ] && [ -f "$TAG_FILE" ] && [ "$(cat "$TAG_FILE")" = "$LATEST" ] && [ -f "${BIN_DIR}/ecarte" ]; then

@@ -29,6 +29,8 @@ pub struct Release {
     pub tag: String,
     pub notes: String,
     pub asset_url: String,
+    /// URL publique de téléchargement direct (sans API ni jeton).
+    pub download_url: String,
     pub asset_size: u64,
 }
 
@@ -94,16 +96,27 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
-fn request(url: &str, accept: &str, token: &Option<String>) -> Result<ureq::http::Response<ureq::Body>, String> {
+fn request_once(url: &str, accept: &str, token: &Option<String>) -> Result<ureq::http::Response<ureq::Body>, String> {
     let mut req = agent().get(url).header("Accept", accept).header("User-Agent", "ecarte-updater");
     if let Some(t) = token {
         req = req.header("Authorization", format!("Bearer {t}"));
     }
     req.call().map_err(|e| match e {
-        ureq::Error::StatusCode(404) => "dépôt introuvable ou accès refusé (jeton requis pour un dépôt privé)".to_string(),
+        ureq::Error::StatusCode(404) => "dépôt introuvable ou accès refusé".to_string(),
         ureq::Error::StatusCode(c) => format!("HTTP {c}"),
         e => e.to_string(),
     })
+}
+
+/// Requête sans jeton ; en cas d'échec, nouvel essai avec un jeton s'il en existe un.
+fn request(url: &str, accept: &str) -> Result<ureq::http::Response<ureq::Body>, String> {
+    match request_once(url, accept, &None) {
+        Ok(r) => Ok(r),
+        Err(first) => match token() {
+            Some(t) => request_once(url, accept, &Some(t)).map_err(|_| first),
+            None => Err(first),
+        },
+    }
 }
 
 /// Interroge la dernière release. `Ok(Some)` si elle est plus récente que le build courant.
@@ -111,8 +124,7 @@ pub fn check() -> Result<Option<Release>, String> {
     let Some(cur) = build_number(CURRENT) else {
         return Ok(None); // build local (« dev ») : pas de mise à jour automatique
     };
-    let tok = token();
-    let mut resp = request(&format!("https://api.github.com/repos/{REPO}/releases/latest"), "application/vnd.github+json", &tok)?;
+    let mut resp = request(&format!("https://api.github.com/repos/{REPO}/releases/latest"), "application/vnd.github+json")?;
     let text = resp.body_mut().read_to_string().map_err(|e| e.to_string())?;
     let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     let tag = v.get("tag_name").and_then(|t| t.as_str()).ok_or("réponse inattendue")?.to_string();
@@ -130,6 +142,7 @@ pub fn check() -> Result<Option<Release>, String> {
         tag,
         notes: v.get("body").and_then(|b| b.as_str()).unwrap_or("").to_string(),
         asset_url: asset.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string(),
+        download_url: asset.get("browser_download_url").and_then(|u| u.as_str()).unwrap_or("").to_string(),
         asset_size: asset.get("size").and_then(|s| s.as_u64()).unwrap_or(0),
     }))
 }
@@ -147,8 +160,10 @@ fn looks_like_executable(b: &[u8]) -> bool {
 
 /// Télécharge et valide le binaire de la release (sans rien remplacer).
 pub fn download(rel: &Release) -> Result<Vec<u8>, String> {
-    let tok = token();
-    let mut resp = request(&rel.asset_url, "application/octet-stream", &tok)?;
+    let mut resp = match request_once(&rel.download_url, "application/octet-stream", &None) {
+        Ok(r) => r,
+        Err(_) => request(&rel.asset_url, "application/octet-stream")?,
+    };
     let bytes = resp.body_mut().with_config().limit(300 * 1024 * 1024).read_to_vec().map_err(|e| e.to_string())?;
     if bytes.len() < 1_000_000 || (rel.asset_size > 0 && bytes.len() as u64 != rel.asset_size) {
         return Err(format!("téléchargement incomplet ({} octets, attendu {})", bytes.len(), rel.asset_size));
