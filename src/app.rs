@@ -3,6 +3,7 @@ use crate::doc::*;
 use crate::export::{self, Format};
 use crate::geo::{haversine_km, Projection};
 use crate::logs;
+use crate::update;
 use crate::scene::{self, Prim, View, P};
 use crate::data::{self, Availability, DsKind, Settings, SyncOutcome};
 use crate::world::{Data, World};
@@ -114,8 +115,9 @@ fn convert(prims: &[Prim]) -> Vec<U> {
                 }
                 if let Some(s) = stroke {
                     for r in rings {
+                        let r = clean_path(r, *closed);
                         if r.len() >= 2 {
-                            out.push(U::Stroke { pts: r.clone(), closed: *closed, color: c32(s.color), width: s.width, dashed: s.dashed });
+                            out.push(U::Stroke { pts: r, closed: *closed, color: c32(s.color), width: s.width, dashed: s.dashed });
                         }
                     }
                 }
@@ -165,6 +167,8 @@ pub struct EcarteApp {
     settings: Settings,
     sync_rx: Option<mpsc::Receiver<SyncMsg>>,
     sync_log: Vec<String>,
+    upd_rx: Option<mpsc::Receiver<UpdMsg>>,
+    upd: UpdState,
     cache: Vec<U>,
     dirty: bool,
 
@@ -208,6 +212,8 @@ impl EcarteApp {
             settings: Settings::load(),
             sync_rx: None,
             sync_log: vec![],
+            upd_rx: None,
+            upd: UpdState::Idle,
             cache: vec![],
             dirty: true,
             tool: Tool::Select,
@@ -299,13 +305,21 @@ impl EcarteApp {
             logs::info("ouverture : aucun fichier choisi (annulé ou dialogue indisponible)");
             return;
         };
+        self.open_path(p);
+    }
+
+    pub fn open_path(&mut self, p: PathBuf) {
         match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|s| Document::from_json(&s)) {
             Ok(d) => {
                 self.set_doc(d);
+                logs::info(&format!("ouvert : {}", p.display()));
                 self.status = format!("Ouvert : {}", p.display());
                 self.path = Some(p);
             }
-            Err(e) => self.status = format!("Erreur d'ouverture : {e}"),
+            Err(e) => {
+                logs::error(&format!("ouverture {} : {e}", p.display()));
+                self.status = format!("Erreur d'ouverture : {e}");
+            }
         }
     }
 
@@ -1203,6 +1217,7 @@ impl eframe::App for EcarteApp {
         }
 
         self.poll_data(&ctx);
+        self.poll_updates(&ctx);
 
         egui::Panel::top("menu").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
@@ -1252,6 +1267,15 @@ impl eframe::App for EcarteApp {
                     ui.label("Molette : zoom · outil ✋ ou clic milieu : déplacer");
                     ui.label("Polygone/polyligne : double-clic ou Entrée pour finir");
                     ui.label("Données : Natural Earth (domaine public)");
+                    ui.separator();
+                    ui.label(format!("Version : {}", update::CURRENT));
+                    if ui.button("Rechercher des mises à jour").clicked() {
+                        self.check_updates(true);
+                        ui.close();
+                    }
+                    if ui.checkbox(&mut self.settings.check_updates, "Vérifier au démarrage").changed() {
+                        self.settings.save();
+                    }
                     ui.separator();
                     if ui.button("Ouvrir les logs").clicked() {
                         let p = logs::path();
@@ -1334,6 +1358,7 @@ impl eframe::App for EcarteApp {
         });
 
         egui::CentralPanel::default().show_inside(ui, |ui| self.canvas(ui));
+        self.update_popup(&ctx);
 
         // suivi des modifications -> annuler/rétablir groupé + reconstruction du cache
         if self.doc != self.snapshot {
@@ -1433,6 +1458,9 @@ impl EcarteApp {
     fn poll_data(&mut self, ctx: &egui::Context) {
         if self.data_key.is_empty() {
             self.refresh_data();
+            if self.settings.check_updates {
+                self.check_updates(false);
+            }
             if self.settings.auto_sync {
                 let ids = Self::cached_ids();
                 self.start_sync(ids);
@@ -1732,4 +1760,301 @@ impl EcarteApp {
             ctx.set_cursor_icon(c);
         }
     }
+}
+
+// ------------------------------------------------------------ Mise à jour automatique
+
+enum UpdMsg {
+    Checked(Result<Option<update::Release>, String>, bool),
+    Installed(Result<(), String>),
+}
+
+enum UpdState {
+    Idle,
+    Offered(update::Release),
+    Downloading(update::Release),
+    Ready(String),
+    Failed(String),
+}
+
+enum UpdAction {
+    Install,
+    Later,
+    Skip,
+    Restart,
+}
+
+impl EcarteApp {
+    fn check_updates(&mut self, manual: bool) {
+        if self.upd_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.upd_rx = Some(rx);
+        if manual {
+            self.status = "Recherche de mises à jour…".into();
+        }
+        std::thread::spawn(move || {
+            let _ = tx.send(UpdMsg::Checked(update::check(), manual));
+        });
+    }
+
+    fn poll_updates(&mut self, ctx: &egui::Context) {
+        let mut msgs = Vec::new();
+        if let Some(rx) = &self.upd_rx {
+            while let Ok(m) = rx.try_recv() {
+                msgs.push(m);
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(300));
+        }
+        for m in msgs {
+            match m {
+                UpdMsg::Checked(res, manual) => {
+                    self.upd_rx = None;
+                    match res {
+                        Ok(Some(rel)) => {
+                            logs::info(&format!("mise à jour disponible : {} (actuel : {})", rel.tag, update::CURRENT));
+                            if manual || self.settings.skipped_tag != rel.tag {
+                                self.upd = UpdState::Offered(rel);
+                            }
+                        }
+                        Ok(None) => {
+                            logs::info("aucune mise à jour");
+                            if manual {
+                                self.status = if update::CURRENT == "dev" {
+                                    "Build local : mises à jour automatiques désactivées".into()
+                                } else {
+                                    format!("Vous avez la dernière version ({})", update::CURRENT)
+                                };
+                            }
+                        }
+                        Err(e) => {
+                            logs::error(&format!("recherche de mise à jour : {e}"));
+                            if manual {
+                                self.upd = UpdState::Failed(format!("Impossible de vérifier les mises à jour : {e}"));
+                            }
+                        }
+                    }
+                }
+                UpdMsg::Installed(res) => {
+                    self.upd_rx = None;
+                    let tag = match &self.upd {
+                        UpdState::Downloading(r) => r.tag.clone(),
+                        _ => String::new(),
+                    };
+                    match res {
+                        Ok(()) => {
+                            logs::info(&format!("mise à jour installée : {tag}"));
+                            self.upd = UpdState::Ready(tag);
+                        }
+                        Err(e) => {
+                            logs::error(&format!("installation de la mise à jour : {e}"));
+                            self.upd = UpdState::Failed(format!("La mise à jour a échoué : {e}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn update_popup(&mut self, ctx: &egui::Context) {
+        if matches!(self.upd, UpdState::Idle) {
+            return;
+        }
+        let mut action: Option<UpdAction> = None;
+        let mut close = false;
+        egui::Window::new("Mise à jour de E-cart-é")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.set_max_width(380.0);
+                match &self.upd {
+                    UpdState::Offered(r) => {
+                        ui.label(format!("Une nouvelle version est disponible : {}", r.tag));
+                        ui.label(format!("Version actuelle : {}", update::CURRENT));
+                        if !r.notes.trim().is_empty() {
+                            egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                                ui.small(r.notes.trim());
+                            });
+                        }
+                        ui.separator();
+                        ui.label("Le logiciel sera téléchargé, remplacé, puis redémarrera. Pensez à enregistrer votre carte.");
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.button("Mettre à jour maintenant").clicked() {
+                                action = Some(UpdAction::Install);
+                            }
+                            if ui.button("Plus tard").clicked() {
+                                action = Some(UpdAction::Later);
+                            }
+                            if ui.button("Ignorer cette version").clicked() {
+                                action = Some(UpdAction::Skip);
+                            }
+                        });
+                    }
+                    UpdState::Downloading(r) => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(format!("Téléchargement de {}…", r.tag));
+                        });
+                    }
+                    UpdState::Ready(tag) => {
+                        ui.label(format!("Mise à jour {tag} installée."));
+                        ui.label("Redémarrez pour l'utiliser (enregistrez d'abord votre carte).");
+                        ui.horizontal(|ui| {
+                            if ui.button("Redémarrer maintenant").clicked() {
+                                action = Some(UpdAction::Restart);
+                            }
+                            if ui.button("Plus tard").clicked() {
+                                action = Some(UpdAction::Later);
+                            }
+                        });
+                    }
+                    UpdState::Failed(e) => {
+                        ui.colored_label(Color32::from_rgb(220, 90, 70), e);
+                        ui.label("Vous pouvez aussi mettre à jour avec la commande ecarte-update (Linux) ou en téléchargeant la release.");
+                        if ui.button("Fermer").clicked() {
+                            close = true;
+                        }
+                    }
+                    UpdState::Idle => {}
+                }
+            });
+        if close {
+            self.upd = UpdState::Idle;
+        }
+        match action {
+            Some(UpdAction::Install) => {
+                if let UpdState::Offered(rel) = std::mem::replace(&mut self.upd, UpdState::Idle) {
+                    self.upd = UpdState::Downloading(rel.clone());
+                    let (tx, rx) = mpsc::channel();
+                    self.upd_rx = Some(rx);
+                    std::thread::spawn(move || {
+                        let _ = tx.send(UpdMsg::Installed(update::install(&rel)));
+                    });
+                }
+            }
+            Some(UpdAction::Later) => self.upd = UpdState::Idle,
+            Some(UpdAction::Skip) => {
+                if let UpdState::Offered(r) = &self.upd {
+                    self.settings.skipped_tag = r.tag.clone();
+                    self.settings.save();
+                }
+                self.upd = UpdState::Idle;
+            }
+            Some(UpdAction::Restart) => update::restart(),
+            None => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod spike_scan {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Tessellate chaque contour comme à l'écran et détecte les « pointes » (sommets très loin du tracé).
+    #[test]
+    #[ignore]
+    fn find_stroke_spikes() {
+        let mut layers = HashMap::new();
+        for id in ["lakes_110m", "rivers_110m"] {
+            layers.insert(id.to_string(), Arc::new(crate::data::load(id).unwrap()));
+        }
+        let data = Data { base: Arc::new(crate::data::load("countries_110m").unwrap()), capitals: Arc::new(crate::data::capitals()), layers };
+        let mut tess = epaint::Tessellator::new(1.0, epaint::TessellationOptions::default(), [1024, 1024], vec![]);
+        let s = 0.7f32;
+        let mut found = 0;
+        let mut lon = 0.0;
+        while lon <= 60.0 {
+            let mut lat = -50.0;
+            while lat <= 10.0 {
+                for zoom in [2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 12.0] {
+                    let mut d = Document::default();
+                    d.map.center_lon = lon;
+                    d.map.center_lat = lat;
+                    d.map.zoom = zoom;
+                    for u in convert(&scene::build(&d, &data)) {
+                        if let U::Stroke { pts, closed, color, width, .. } = u {
+                            let v: Vec<Pos2> = pts.iter().map(|p| Pos2::new(p[0] * s, p[1] * s)).collect();
+                            if v.len() < 2 {
+                                continue;
+                            }
+                            let st = epaint::Stroke::new((width * s).max(0.4), color);
+                            let shape = if closed { epaint::Shape::closed_line(v.clone(), st) } else { epaint::Shape::line(v.clone(), st) };
+                            let mut mesh = epaint::Mesh::default();
+                            tess.tessellate_shape(shape, &mut mesh);
+                            let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+                            for p in &v {
+                                x0 = x0.min(p.x);
+                                y0 = y0.min(p.y);
+                                x1 = x1.max(p.x);
+                                y1 = y1.max(p.y);
+                            }
+                            let pad = 50.0;
+                            for vert in &mesh.vertices {
+                                let p = vert.pos;
+                                if !(p.x.is_finite() && p.y.is_finite()) || p.x < x0 - pad || p.x > x1 + pad || p.y < y0 - pad || p.y > y1 + pad {
+                                    if found < 8 {
+                                        found += 1;
+                                        println!("SPIKE lon={lon} lat={lat} z={zoom} closed={closed} n={} vert={:?} bbox=({x0},{y0},{x1},{y1})", v.len(), p);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                lat += 2.5;
+            }
+            lon += 2.5;
+        }
+        println!("scan done, spikes={found}");
+    }
+}
+
+/// Nettoie un contour avant tessellation par egui : points doublés, point final = premier,
+/// et « pointes » (retours à 180°) qui font générer à egui des sommets énormes ou NaN.
+fn clean_path(pts: &[P], closed: bool) -> Vec<P> {
+    let mut v: Vec<P> = Vec::with_capacity(pts.len());
+    for p in pts {
+        if !(p[0].is_finite() && p[1].is_finite()) {
+            continue;
+        }
+        if v.last().is_none_or(|l| (l[0] - p[0]).abs() > 1e-3 || (l[1] - p[1]).abs() > 1e-3) {
+            v.push(*p);
+        }
+    }
+    for _ in 0..8 {
+        if closed && v.len() > 1 {
+            let (f, l) = (v[0], v[v.len() - 1]);
+            if (f[0] - l[0]).abs() <= 1e-3 && (f[1] - l[1]).abs() <= 1e-3 {
+                v.pop();
+            }
+        }
+        let n = v.len();
+        if n < 3 {
+            break;
+        }
+        let mut keep = vec![true; n];
+        let mut changed = false;
+        let range = if closed { 0..n } else { 1..n - 1 };
+        for i in range {
+            let (a, b, c) = (v[(i + n - 1) % n], v[i], v[(i + 1) % n]);
+            let (u, w) = ([b[0] - a[0], b[1] - a[1]], [c[0] - b[0], c[1] - b[1]]);
+            let cross = u[0] * w[1] - u[1] * w[0];
+            let dot = u[0] * w[0] + u[1] * w[1];
+            let (lu, lw) = (u[0].hypot(u[1]), w[0].hypot(w[1]));
+            // demi-tour quasi parfait : le sommet est une pointe
+            if dot < 0.0 && cross.abs() <= 1e-3 * lu * lw {
+                keep[i] = false;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+        v = v.into_iter().zip(keep).filter(|(_, k)| *k).map(|(p, _)| p).collect();
+    }
+    v
 }

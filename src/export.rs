@@ -141,3 +141,22 @@ mod icon {
         pix.save_png("assets/ecarte-48.png").unwrap();
     }
 }
+
+#[cfg(test)]
+mod view_dump {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn dump_view() {
+        let out = std::env::var("ECARTE_OUT").unwrap();
+        let g = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        let data = Data::embedded_only();
+        let mut d = Document::default();
+        d.map.center_lon = g("CLON", 20.0);
+        d.map.center_lat = g("CLAT", -15.0);
+        d.map.zoom = g("ZOOM", 3.0);
+        d.title.visible = false;
+        export(&d, &data, std::path::Path::new(&format!("{out}/v.png")), Format::Png, 72.0, 90).unwrap();
+    }
+}

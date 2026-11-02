@@ -1188,3 +1188,162 @@ mod handle_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod debug_edges {
+    use super::*;
+    use crate::world::World;
+
+    #[test]
+    #[ignore]
+    fn find_long_edges() {
+        let w = World::embedded();
+        for proj in [Projection::Mercator, Projection::Equirectangular] {
+            for clon in [-170.0, -60.0, -10.0, 0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 100.0, 170.0, 179.0] {
+                for clat in [-40.0, -35.0, -30.0, -10.0, 0.0, 20.0, 50.0] {
+                    for zoom in [1.0, 2.0, 3.0, 4.0, 6.0, 8.0] {
+                        let mut d = Document::default();
+                        d.map.proj = proj;
+                        d.map.center_lon = clon;
+                        d.map.center_lat = clat;
+                        d.map.zoom = zoom;
+                        let v = View::new(&d);
+                        let f = v.frame;
+                        let inside = |p: P| p[0] > f[0] && p[0] < f[0] + f[2] && p[1] > f[1] && p[1] < f[1] + f[3];
+                        for c in &w.countries {
+                            for poly in &c.polys {
+                                let mut out = Vec::new();
+                                poly_prims(&v, poly, None, Some(Stroke { color: [0; 4], width: 1.0, dashed: false }), &mut out);
+                                for p in out {
+                                    if let Prim::Path { rings, .. } = p {
+                                        for r in rings {
+                                            let n = r.len();
+                                            for i in 0..n {
+                                                let (a, b) = (r[i], r[(i + 1) % n]);
+                                                let len = (a[0] - b[0]).hypot(a[1] - b[1]);
+                                                let x_span = (a[0] - b[0]).abs();
+                                                // arête longue, quasi verticale, qui touche le cadre
+                                                if len > 120.0 && x_span < len * 0.35 && (inside(a) || inside(b)) {
+                                                    println!("{:?} lon0={clon} lat0={clat} z={zoom} {} edge {:?}->{:?} len={len:.0}", proj, c.name, a, b);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod debug_layers {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn find_long_edges_layers() {
+        for id in ["countries_50m", "rivers_110m", "lakes_110m", "lakes_50m", "rivers_50m", "admin1_50m"] {
+            let Some(w) = crate::data::load(id) else { continue };
+            let mut hits = 0;
+            for clon in [0.0, 10.0, 20.0, 25.0, 30.0, 40.0] {
+                for clat in [-40.0, -30.0, -10.0] {
+                    for zoom in [2.0, 3.0, 4.0, 6.0, 9.0] {
+                        let mut d = Document::default();
+                        d.map.center_lon = clon;
+                        d.map.center_lat = clat;
+                        d.map.zoom = zoom;
+                        let v = View::new(&d);
+                        let f = v.frame;
+                        let inside = |p: P| p[0] > f[0] && p[0] < f[0] + f[2] && p[1] > f[1] && p[1] < f[1] + f[3];
+                        let st = Stroke { color: [0; 4], width: 1.0, dashed: false };
+                        for c in &w.countries {
+                            let mut out = Vec::new();
+                            for poly in &c.polys {
+                                poly_prims(&v, poly, None, Some(st), &mut out);
+                            }
+                            for l in &c.lines {
+                                line_prims(&v, l, st, &mut out);
+                            }
+                            for p in out {
+                                if let Prim::Path { rings, closed, .. } = p {
+                                    for r in rings {
+                                        let n = r.len();
+                                        let segs = if closed { n } else { n - 1 };
+                                        for i in 0..segs {
+                                            let (a, b) = (r[i], r[(i + 1) % n]);
+                                            let len = (a[0] - b[0]).hypot(a[1] - b[1]);
+                                            if len > 200.0 && (inside(a) || inside(b)) && hits < 4 {
+                                                hits += 1;
+                                                println!("{id} lon0={clon} lat0={clat} z={zoom} {} {:?}->{:?} len={len:.0}", c.name, a, b);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod debug_build {
+    use super::*;
+    use crate::world::Data;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    #[test]
+    #[ignore]
+    fn scan_build_output() {
+        for base in ["countries_110m", "countries_50m"] {
+            let mut layers = HashMap::new();
+            for id in ["lakes_110m", "rivers_110m"] {
+                layers.insert(id.to_string(), Arc::new(crate::data::load(id).unwrap()));
+            }
+            let data = Data { base: Arc::new(crate::data::load(base).unwrap()), capitals: Arc::new(crate::data::capitals()), layers };
+            let mut found = 0;
+            let mut lon = -10.0;
+            while lon <= 70.0 {
+                // balayage dense
+                let mut lat = -50.0;
+                while lat <= 15.0 {
+                    for zoom in [4.0, 6.0, 8.0] {
+                        let mut d = Document::default();
+                        d.map.center_lon = lon;
+                        d.map.center_lat = lat;
+                        d.map.zoom = zoom;
+                        let prims = build(&d, &data);
+                        let f = View::new(&d).frame;
+                        let inside = |p: P| p[0] > f[0] && p[0] < f[0] + f[2] && p[1] > f[1] && p[1] < f[1] + f[3];
+                        for p in &prims {
+                            if let Prim::Path { rings, closed, stroke: Some(_), .. } = p {
+                                for r in rings {
+                                    let n = r.len();
+                                    if n < 3 || n == 4 && *closed { continue; }
+                                    let segs = if *closed { n } else { n - 1 };
+                                    for i in 0..segs {
+                                        let (a, b) = (r[i], r[(i + 1) % n]);
+                                        let len = (a[0] - b[0]).hypot(a[1] - b[1]);
+                                        if len > 150.0 && (inside(a) || inside(b)) && found < 6 {
+                                            found += 1;
+                                            println!("{base} lon={lon} lat={lat} z={zoom} closed={closed} n={n} {:?}->{:?} len={len:.0}", a, b);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    lat += 2.5;
+                }
+                lon += 1.5;
+            }
+        }
+    }
+}

@@ -237,11 +237,15 @@ pub fn sync_one(d: &Dataset) -> SyncOutcome {
 pub struct Settings {
     /// Au démarrage, vérifier (si en ligne) les mises à jour des jeux de données déjà en cache.
     pub auto_sync: bool,
+    /// Rechercher les mises à jour du logiciel au démarrage.
+    pub check_updates: bool,
+    /// Version ignorée par l'utilisateur (ne plus proposer).
+    pub skipped_tag: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { auto_sync: true }
+        Settings { auto_sync: true, check_updates: true, skipped_tag: String::new() }
     }
 }
 

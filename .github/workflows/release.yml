@@ -41,6 +41,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev
 
+      - name: Étiquette de build
+        shell: bash
+        run: echo "ECARTE_BUILD_TAG=build-${{ github.run_number }}-$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_ENV"
+
       - name: Tests
         run: cargo test --release
 
@@ -55,6 +59,7 @@ jobs:
           cp -r assets dist/ecarte/assets
           chmod +x dist/ecarte/install.sh
           tar -C dist -czf ecarte-${{ matrix.name }}.tar.gz ecarte
+          cp target/release/${{ matrix.bin }} ecarte-linux-x86_64
 
       - name: Empaquetage (Windows)
         if: runner.os == 'Windows'
@@ -64,6 +69,7 @@ jobs:
           Copy-Item target/release/${{ matrix.bin }}, README.md dist/ecarte/
           Copy-Item -Recurse assets dist/ecarte/assets
           Compress-Archive -Path dist/ecarte -DestinationPath ecarte-${{ matrix.name }}.zip
+          Copy-Item target/release/${{ matrix.bin }} ecarte-windows-x86_64.exe
 
       - uses: actions/upload-artifact@v4
         with:
@@ -71,6 +77,8 @@ jobs:
           path: |
             ecarte-${{ matrix.name }}.tar.gz
             ecarte-${{ matrix.name }}.zip
+            ecarte-linux-x86_64
+            ecarte-windows-x86_64.exe
           if-no-files-found: ignore
 
   release:

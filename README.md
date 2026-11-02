@@ -61,3 +61,13 @@ sh install.sh                       # installe, ou met à jour si déjà install
 - Onglet **Carte > Capitales** : *Aucune*, *Points* ou *Points + noms* (forme, taille, couleurs, seulement les pays coloriés). Les noms qui se chevauchent sont masqués (les plus peuplées d'abord).
 - Outil **Capitale** (touche M) : clic sur un pays -> point à sa capitale, avec ou sans nom, modifiable ensuite comme n'importe quel élément.
 - 215 capitales intégrées (Natural Earth), donc disponibles hors ligne.
+
+## Mise à jour automatique
+
+Au démarrage (désactivable dans **Aide**), l'application cherche une release plus récente et propose, dans une fenêtre, de
+**mettre à jour maintenant**, **plus tard** ou **ignorer cette version**. Elle télécharge le binaire Linux ou Windows, remplace
+l'exécutable, puis redémarre à la demande. **Aide > Rechercher des mises à jour** force la vérification.
+
+Dépôt privé : l'application utilise `GITHUB_TOKEN`/`GH_TOKEN`, un fichier `token` dans le dossier de données
+(`~/.local/share/ecarte/token` ou `%APPDATA%\ecarte\token`), ou `gh auth token`. Sans accès, la vérification est
+simplement ignorée (voir les logs). Les compilations locales (`cargo build`) ne se mettent pas à jour seules.

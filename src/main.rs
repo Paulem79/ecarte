@@ -9,10 +9,12 @@ mod geo;
 mod logs;
 mod scene;
 mod svg;
+mod update;
 mod world;
 
 fn main() -> eframe::Result<()> {
     logs::init();
+    update::init();
     let opts = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("E-cart-é")
@@ -20,5 +22,16 @@ fn main() -> eframe::Result<()> {
             .with_min_inner_size([480.0, 320.0]),
         ..Default::default()
     };
-    eframe::run_native("E-cart-é", opts, Box::new(|cc| Ok(Box::new(app::EcarteApp::new(cc)))))
+    let arg = std::env::args_os().nth(1).map(std::path::PathBuf::from);
+    eframe::run_native(
+        "E-cart-é",
+        opts,
+        Box::new(move |cc| {
+            let mut a = app::EcarteApp::new(cc);
+            if let Some(p) = arg {
+                a.open_path(p);
+            }
+            Ok(Box::new(a))
+        }),
+    )
 }
