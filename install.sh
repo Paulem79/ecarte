@@ -41,6 +41,24 @@ esac
 [ "$(uname -m)" = "x86_64" ] || die "architecture $(uname -m) non prise en charge (x86_64 requis)"
 command -v tar >/dev/null 2>&1 || die "tar est requis"
 
+
+# Dépendances système (Debian/antiX) : uniquement ce qui manque
+if command -v dpkg >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+  NEED=""
+  have() { dpkg -s "$1" >/dev/null 2>&1; }
+  have libgtk-3-0t64 || have libgtk-3-0 || NEED="$NEED libgtk-3-0t64"
+  have libxkbcommon0 || NEED="$NEED libxkbcommon0"
+  have libgl1 || NEED="$NEED libgl1"
+  have fonts-dejavu-core || NEED="$NEED fonts-dejavu-core"   # texte des exports PNG/JPG
+  have xdg-utils || NEED="$NEED xdg-utils"                    # Aide > Ouvrir les logs
+  command -v curl >/dev/null 2>&1 || NEED="$NEED curl"
+  if [ -n "$NEED" ]; then
+    say "Dépendances manquantes :$NEED"
+    if [ "$(id -u)" = 0 ]; then SUDO=""; else SUDO="sudo"; fi
+    $SUDO apt-get install -y $NEED || say "Installation des dépendances échouée : à faire à la main (sudo apt install$NEED)"
+  fi
+fi
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 

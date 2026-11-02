@@ -2,6 +2,7 @@
 use crate::doc::*;
 use crate::export::{self, Format};
 use crate::geo::{haversine_km, Projection};
+use crate::logs;
 use crate::scene::{self, Prim, View, P};
 use crate::data::{self, Availability, DsKind, Settings, SyncOutcome};
 use crate::world::{Data, World};
@@ -265,17 +266,23 @@ impl EcarteApp {
         } else {
             self.path.clone()
         };
-        let Some(mut p) = path else { return false };
+        let Some(mut p) = path else {
+            self.status = "Enregistrement annulé (ou boîte de dialogue indisponible : voir Aide > Ouvrir les logs)".into();
+            logs::info("enregistrement : aucun chemin choisi (annulé ou dialogue indisponible)");
+            return false;
+        };
         if p.extension().is_none() {
             p.set_extension("ecarte");
         }
         match std::fs::write(&p, self.doc.to_json()) {
             Ok(()) => {
+                logs::info(&format!("enregistré : {}", p.display()));
                 self.status = format!("Enregistré : {}", p.display());
                 self.path = Some(p);
                 true
             }
             Err(e) => {
+                logs::error(&format!("enregistrement {} : {e}", p.display()));
                 self.status = format!("Erreur d'enregistrement : {e}");
                 false
             }
@@ -283,7 +290,10 @@ impl EcarteApp {
     }
 
     fn open(&mut self) {
-        let Some(p) = rfd::FileDialog::new().add_filter("Carte E-cart-é", &["ecarte"]).pick_file() else { return };
+        let Some(p) = rfd::FileDialog::new().add_filter("Carte E-cart-é", &["ecarte"]).pick_file() else {
+            logs::info("ouverture : aucun fichier choisi (annulé ou dialogue indisponible)");
+            return;
+        };
         match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|s| Document::from_json(&s)) {
             Ok(d) => {
                 self.set_doc(d);
@@ -302,6 +312,8 @@ impl EcarteApp {
             .set_file_name(format!("{name}.{}", fmt.ext()))
             .save_file()
         else {
+            logs::info("export : aucun chemin choisi (annulé ou dialogue indisponible)");
+            self.status = "Export annulé (ou boîte de dialogue indisponible : voir Aide > Ouvrir les logs)".into();
             return;
         };
         if p.extension().is_none() {
@@ -313,6 +325,10 @@ impl EcarteApp {
         self.status = "Export en cours…".into();
         std::thread::spawn(move || {
             let r = export::export(&doc, &data, &p, fmt, dpi, q).map(|_| format!("Exporté : {}", p.display()));
+            match &r {
+                Ok(m) => logs::info(m),
+                Err(e) => logs::error(&format!("export {} : {e}", p.display())),
+            }
             let _ = tx.send(r);
         });
     }
@@ -1188,6 +1204,17 @@ impl eframe::App for EcarteApp {
                     ui.label("Molette : zoom · outil ✋ ou clic milieu : déplacer");
                     ui.label("Polygone/polyligne : double-clic ou Entrée pour finir");
                     ui.label("Données : Natural Earth (domaine public)");
+                    ui.separator();
+                    if ui.button("Ouvrir les logs").clicked() {
+                        let p = logs::path();
+                        logs::info("ouverture du journal demandée");
+                        self.status = match logs::open_in_viewer(&p) {
+                            Ok(()) => format!("Logs : {}", p.display()),
+                            Err(e) => format!("Logs : {e}"),
+                        };
+                        ui.close();
+                    }
+                    ui.label(format!("{}", logs::path().display()));
                 });
             });
         });
@@ -1384,6 +1411,7 @@ impl EcarteApp {
                         self.loaded.remove(&id);
                         reload = true;
                     }
+                    logs::info(&format!("sync {id} : {txt}"));
                     self.sync_log.push(format!("{id} : {txt}"));
                 }
                 SyncMsg::Done => done = true,

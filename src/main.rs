@@ -6,11 +6,13 @@ mod data;
 mod doc;
 mod export;
 mod geo;
+mod logs;
 mod scene;
 mod svg;
 mod world;
 
 fn main() -> eframe::Result<()> {
+    logs::init();
     let opts = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("E-cart-é")

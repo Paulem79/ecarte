@@ -49,3 +49,9 @@ sh install.sh                       # installe, ou met à jour si déjà install
 - Installe dans `~/.local/bin/ecarte`, ajoute le lanceur au menu IceWM (Applications) et l'icône.
 - Mise à jour ensuite : commande `ecarte-update` (ou `sh install.sh`). `--force` réinstalle, `--uninstall` supprime.
 - Chaque commit sur `main` publie une release (Linux + Windows) via GitHub Actions.
+
+## Dépannage
+
+- **Aide > Ouvrir les logs** : journal dans `~/.local/share/ecarte/ecarte.log` (démarrage, enregistrements, exports, synchronisations, plantages).
+- Les boîtes de dialogue de fichiers utilisent GTK3 sous Linux (pas de portail XDG requis).
+- Depuis un clone du dépôt : `git pull && ./install.sh` installe les dépendances manquantes (apt) puis la dernière release.
