@@ -1,0 +1,93 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-22.04 # glibc ancienne => binaire compatible Debian/antiX
+            name: linux-x86_64
+            bin: ecarte
+          - os: windows-latest
+            name: windows-x86_64
+            bin: ecarte.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Dépendances système (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev
+
+      - name: Tests
+        run: cargo test --release
+
+      - name: Compilation release
+        run: cargo build --release
+
+      - name: Empaquetage (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist/ecarte
+          cp target/release/${{ matrix.bin }} README.md dist/ecarte/
+          tar -C dist -czf ecarte-${{ matrix.name }}.tar.gz ecarte
+
+      - name: Empaquetage (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/ecarte | Out-Null
+          Copy-Item target/release/${{ matrix.bin }}, README.md dist/ecarte/
+          Compress-Archive -Path dist/ecarte -DestinationPath ecarte-${{ matrix.name }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ecarte-${{ matrix.name }}
+          path: |
+            ecarte-${{ matrix.name }}.tar.gz
+            ecarte-${{ matrix.name }}.zip
+          if-no-files-found: ignore
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publier la release (une par commit)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="build-${{ github.run_number }}-$(echo "${{ github.sha }}" | cut -c1-7)"
+          MSG=$(git log -1 --pretty=%s 2>/dev/null || true)
+          gh release create "$TAG" artifacts/* \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "E-cart-é $TAG" \
+            --notes "Build automatique du commit ${{ github.sha }}." \
+            --latest
