@@ -51,7 +51,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           mkdir -p dist/ecarte
-          cp target/release/${{ matrix.bin }} README.md dist/ecarte/
+          cp target/release/${{ matrix.bin }} README.md install.sh dist/ecarte/
+          cp -r assets dist/ecarte/assets
+          chmod +x dist/ecarte/install.sh
           tar -C dist -czf ecarte-${{ matrix.name }}.tar.gz ecarte
 
       - name: Empaquetage (Windows)
@@ -60,6 +62,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist/ecarte | Out-Null
           Copy-Item target/release/${{ matrix.bin }}, README.md dist/ecarte/
+          Copy-Item -Recurse assets dist/ecarte/assets
           Compress-Archive -Path dist/ecarte -DestinationPath ecarte-${{ matrix.name }}.zip
 
       - uses: actions/upload-artifact@v4

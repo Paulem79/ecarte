@@ -127,3 +127,16 @@ mod manual {
         export(&d, &data, std::path::Path::new(&format!("{out}/c.svg")), Format::Svg, 96.0, 85).unwrap();
     }
 }
+
+#[cfg(test)]
+mod icon {
+    #[test]
+    #[ignore]
+    fn make_icon_png() {
+        let svg = std::fs::read_to_string("assets/ecarte.svg").unwrap();
+        let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).unwrap();
+        let mut pix = resvg::tiny_skia::Pixmap::new(48, 48).unwrap();
+        resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(48.0 / 64.0, 48.0 / 64.0), &mut pix.as_mut());
+        pix.save_png("assets/ecarte-48.png").unwrap();
+    }
+}

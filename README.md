@@ -35,3 +35,17 @@ cargo build --release
 ```
 
 Données : [Natural Earth](https://www.naturalearthdata.com/) (domaine public).
+
+## Installation sur antiX / Debian (IceWM)
+
+Le dépôt est privé : le script utilise `gh` (connecté) ou un jeton.
+
+```sh
+gh auth login                       # une seule fois (ou: export GITHUB_TOKEN=...)
+gh api repos/Paulem79/ecarte/contents/install.sh -H "Accept: application/vnd.github.raw" > install.sh
+sh install.sh                       # installe, ou met à jour si déjà installé
+```
+
+- Installe dans `~/.local/bin/ecarte`, ajoute le lanceur au menu IceWM (Applications) et l'icône.
+- Mise à jour ensuite : commande `ecarte-update` (ou `sh install.sh`). `--force` réinstalle, `--uninstall` supprime.
+- Chaque commit sur `main` publie une release (Linux + Windows) via GitHub Actions.
