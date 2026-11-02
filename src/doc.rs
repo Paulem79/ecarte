@@ -168,6 +168,7 @@ pub struct MapSettings {
     pub country_label_size: f32,
     pub country_label_min_area: f64,
     pub graticule: Graticule,
+    pub capitals: CapitalsStyle,
 }
 impl Default for MapSettings {
     fn default() -> Self {
@@ -190,6 +191,7 @@ impl Default for MapSettings {
             country_label_size: 11.0,
             country_label_min_area: 30.0,
             graticule: Graticule::default(),
+            capitals: CapitalsStyle::default(),
         }
     }
 }
@@ -372,5 +374,42 @@ impl LayerStyle {
             l("rivers_50m", false, [0, 0, 0, 0], [110, 160, 200, 255], 0.7),
             l("admin1_50m", false, [0, 0, 0, 0], [150, 140, 125, 255], 0.5),
         ]
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum CapMode {
+    Off,
+    Points,
+    PointsAndNames,
+}
+
+/// Capitales des pays affichées directement sur la carte.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CapitalsStyle {
+    pub mode: CapMode,
+    pub shape: PointShape,
+    pub size: f32,
+    pub fill: Rgba,
+    pub outline: Rgba,
+    pub label_size: f32,
+    pub label_color: Rgba,
+    /// Seulement les capitales des pays coloriés.
+    pub only_colored: bool,
+}
+
+impl Default for CapitalsStyle {
+    fn default() -> Self {
+        CapitalsStyle {
+            mode: CapMode::Off,
+            shape: PointShape::Circle,
+            size: 4.5,
+            fill: [200, 30, 30, 255],
+            outline: [255, 255, 255, 255],
+            label_size: 12.0,
+            label_color: [20, 20, 20, 255],
+            only_colored: false,
+        }
     }
 }

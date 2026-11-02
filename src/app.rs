@@ -25,11 +25,12 @@ enum Tool {
     Polyline,
     Rect,
     Polygon,
+    Capital,
     Paint,
 }
 
 impl Tool {
-    const ALL: [(Tool, &'static str, &'static str); 11] = [
+    const ALL: [(Tool, &'static str, &'static str); 12] = [
         (Tool::Select, "⬉", "Sélection / déplacer (S)"),
         (Tool::Pan, "✋", "Déplacer la carte (molette = zoom) (H)"),
         (Tool::Text, "T", "Texte (T)"),
@@ -40,6 +41,7 @@ impl Tool {
         (Tool::Polyline, "〰", "Polyligne : clics, double-clic pour finir"),
         (Tool::Rect, "▭", "Rectangle : glisser (R)"),
         (Tool::Polygon, "⬠", "Polygone : clics, double-clic pour finir (G)"),
+        (Tool::Capital, "", "Capitale d'un pays : clic sur le pays (M)"),
         (Tool::Paint, "🖌", "Colorier un pays (clic droit = effacer) (K)"),
     ];
 }
@@ -175,6 +177,7 @@ pub struct EcarteApp {
     cur_fill: Rgba,
     cur_width: f32,
     paint_color: Rgba,
+    cap_with_name: bool,
 
     path: Option<PathBuf>,
     status: String,
@@ -215,6 +218,7 @@ impl EcarteApp {
             cur_fill: [200, 30, 30, 60],
             cur_width: 3.0,
             paint_color: [230, 160, 70, 255],
+            cap_with_name: true,
             path: None,
             status: "Prêt. Molette = zoom carte, outil ✋ = déplacer.".into(),
             fmt: Format::Png,
@@ -449,6 +453,29 @@ impl EcarteApp {
                 m.country_colors.clear();
             }
         });
+        ui.separator();
+        ui.heading("Capitales");
+        let cs = &mut m.capitals;
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(&mut cs.mode, CapMode::Off, "Aucune");
+            ui.selectable_value(&mut cs.mode, CapMode::Points, "Points");
+            ui.selectable_value(&mut cs.mode, CapMode::PointsAndNames, "Points + noms");
+        });
+        if cs.mode != CapMode::Off {
+            egui::ComboBox::from_id_salt("capshape").selected_text(cs.shape.label()).show_ui(ui, |ui| {
+                for s in PointShape::ALL {
+                    ui.selectable_value(&mut cs.shape, s, s.label());
+                }
+            });
+            ui.add(egui::Slider::new(&mut cs.size, 2.0..=20.0).text("taille"));
+            rgba_edit(ui, "Remplissage", &mut cs.fill);
+            rgba_edit(ui, "Contour", &mut cs.outline);
+            if cs.mode == CapMode::PointsAndNames {
+                ui.add(egui::Slider::new(&mut cs.label_size, 6.0..=30.0).text("taille du nom"));
+                rgba_edit(ui, "Couleur du nom", &mut cs.label_color);
+            }
+            ui.checkbox(&mut cs.only_colored, "Seulement les pays coloriés");
+        }
         ui.separator();
         ui.heading("Graticule");
         let g = &mut m.graticule;
@@ -1006,6 +1033,9 @@ impl EcarteApp {
                             }
                         }
                     }
+                    Tool::Capital if resp.clicked() => {
+                        self.place_capital(&view, p);
+                    }
                     Tool::Paint => {
                         if let Some((lo, la)) = view.unproject(p) {
                             if let Some(c) = self.data.base.country_at(lo, la) {
@@ -1062,6 +1092,7 @@ impl EcarteApp {
                 (egui::Key::A, Tool::Arrow),
                 (egui::Key::R, Tool::Rect),
                 (egui::Key::G, Tool::Polygon),
+                (egui::Key::M, Tool::Capital),
                 (egui::Key::K, Tool::Paint),
             ];
             ctx.input(|i| {
@@ -1258,6 +1289,9 @@ impl eframe::App for EcarteApp {
                     ui.color_edit_button_srgba_unmultiplied(&mut self.cur_fill).on_hover_text("Remplissage");
                 });
                 ui.add(egui::DragValue::new(&mut self.cur_width).range(0.5..=20.0).speed(0.1).prefix("trait "));
+                if self.tool == Tool::Capital {
+                    ui.checkbox(&mut self.cap_with_name, "Avec le nom");
+                }
                 if self.tool == Tool::Paint {
                     ui.label("Couleur du pays");
                     ui.color_edit_button_srgba_unmultiplied(&mut self.paint_color);
@@ -1349,7 +1383,7 @@ impl EcarteApp {
                 .or_insert_with(|| Arc::new(data::load("countries_110m").unwrap_or_default()))
                 .clone()
         });
-        self.data = Arc::new(Data { base, layers });
+        self.data = Arc::new(Data { base, layers, capitals: self.data.capitals.clone() });
         self.data_key = ids.join("|");
         self.dirty = true;
     }
@@ -1557,9 +1591,56 @@ fn draw_tool_icon(p: &egui::Painter, r: Rect, tool: Tool, c: Color32) {
             p.rect_stroke(r.shrink(1.0), 1.0, st, epaint::StrokeKind::Inside);
         }
         Tool::Polygon => add(epaint::Shape::closed_line(vec![pt(0.5, 0.0), pt(1.0, 0.38), pt(0.82, 1.0), pt(0.18, 1.0), pt(0.0, 0.38)], st)),
+        Tool::Capital => {
+            let star: Vec<Pos2> = (0..10)
+                .map(|i| {
+                    let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+                    let rr = if i % 2 == 0 { 0.5 } else { 0.22 };
+                    pt(0.5 + rr * a.cos(), 0.5 + rr * a.sin())
+                })
+                .collect();
+            add(epaint::Shape::closed_line(star, st));
+            p.circle_filled(r.center(), r.width() * 0.1, c);
+        }
         Tool::Paint => {
             p.line_segment([pt(0.95, 0.05), pt(0.45, 0.55)], epaint::Stroke::new(3.0, c));
             add(epaint::Shape::convex_polygon(vec![pt(0.5, 0.45), pt(0.6, 0.6), pt(0.1, 0.98), pt(0.02, 0.88)], c, epaint::Stroke::NONE));
         }
     };
+}
+
+impl EcarteApp {
+    /// Outil « Capitale » : clic sur un pays -> point (et nom) à sa capitale, modifiable ensuite.
+    fn place_capital(&mut self, view: &View, p: P) {
+        let Some((lo, la)) = view.unproject(p) else { return };
+        let Some(country) = self.data.base.country_at(lo, la) else {
+            self.status = "Cliquez à l'intérieur d'un pays.".into();
+            return;
+        };
+        let (iso, cname) = (country.iso.clone(), country.name_fr.clone());
+        let cap = self
+            .data
+            .capitals
+            .iter()
+            .filter(|c| c.iso == iso)
+            .min_by_key(|c| c.alt as u8)
+            .cloned();
+        let Some(cap) = cap else {
+            self.status = format!("Aucune capitale connue pour {cname}.");
+            return;
+        };
+        let label = if self.cap_with_name { cap.name_fr.clone() } else { String::new() };
+        let id = self.doc.add_item(
+            "Capitale",
+            [255, 255, 255, 255],
+            self.cur_stroke,
+            1.5,
+            Kind::Point { pos: Pos::Geo { lon: cap.lon, lat: cap.lat }, radius: 6.0, shape: PointShape::Circle, label, label_size: 16.0 },
+        );
+        if let Some(it) = self.doc.item_mut(id) {
+            it.name = format!("Capitale : {}", cap.name_fr);
+        }
+        self.selected = Some(id);
+        self.status = format!("{} (capitale de {cname})", cap.name_fr);
+    }
 }

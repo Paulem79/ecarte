@@ -2,7 +2,7 @@
 //! Une seule source de vérité : l'écran (egui), le SVG, le PNG et le JPG en dérivent.
 use crate::doc::*;
 use crate::geo::*;
-use crate::world::{Data, Poly, Ring};
+use crate::world::{Capital, Data, Poly, Ring};
 
 pub type P = [f32; 2];
 
@@ -596,6 +596,19 @@ fn marker(shape: PointShape, c: P, r: f32) -> Vec<P> {
     }
 }
 
+/// Marqueur ponctuel (disque, carré, triangle, losange, croix, étoile).
+fn marker_prims(shape: PointShape, c: P, r: f32, fill: Option<Rgba>, stroke: Option<Stroke>, out: &mut Vec<Prim>) {
+    match shape {
+        PointShape::Circle => out.push(Prim::Circle { c, r, fill, stroke }),
+        PointShape::Cross => {
+            let s = stroke.map(|s| Stroke { width: s.width.max(1.5), ..s });
+            out.push(Prim::Path { rings: vec![vec![[c[0] - r, c[1] - r], [c[0] + r, c[1] + r]]], closed: false, fill: None, stroke: s });
+            out.push(Prim::Path { rings: vec![vec![[c[0] - r, c[1] + r], [c[0] + r, c[1] - r]]], closed: false, fill: None, stroke: s });
+        }
+        s => out.push(Prim::Path { rings: vec![marker(s, c, r)], closed: true, fill, stroke }),
+    }
+}
+
 fn item_prims(view: &View, it: &Item, out: &mut Vec<Prim>) {
     let stroke = Some(Stroke { color: it.stroke, width: it.width, dashed: it.dashed });
     let fill = if it.fill[3] > 0 { Some(it.fill) } else { None };
@@ -882,6 +895,40 @@ pub fn build(doc: &Document, data: &Data) -> Vec<Prim> {
         let st = Some(Stroke { color: g.color, width: g.width, dashed: g.dashed });
         for r in &runs {
             out.push(Prim::Path { rings: vec![r.pts.clone()], closed: false, fill: None, stroke: st });
+        }
+    }
+    if m.capitals.mode != CapMode::Off && !data.capitals.is_empty() {
+        let cs = &m.capitals;
+        let banded = view.params.proj.is_banded();
+        let lon0 = view.params.lon0;
+        let mut caps: Vec<&Capital> = data.capitals.iter().filter(|c| !cs.only_colored || m.country_colors.contains_key(&c.iso)).collect();
+        caps.sort_by(|a, b| b.pop.partial_cmp(&a.pop).unwrap_or(std::cmp::Ordering::Equal));
+        let mut pts: Vec<(P, &Capital)> = Vec::new();
+        for c in caps {
+            let lon = if banded { lon0 + wrap_lon(c.lon - lon0) } else { c.lon };
+            if let Some(p) = view.project(lon, c.lat, false) {
+                if p[0] > f[0] && p[0] < f[0] + f[2] && p[1] > f[1] && p[1] < f[1] + f[3] {
+                    pts.push((p, c));
+                }
+            }
+        }
+        let r = cs.size;
+        let st = Some(Stroke { color: cs.outline, width: 1.2, dashed: false });
+        let mut placed: Vec<[f32; 4]> = pts.iter().map(|(p, _)| [p[0] - r - 1.0, p[1] - r - 1.0, 2.0 * r + 2.0, 2.0 * r + 2.0]).collect();
+        for (p, _) in &pts {
+            marker_prims(cs.shape, *p, r, Some(cs.fill), st, &mut out);
+        }
+        if cs.mode == CapMode::PointsAndNames {
+            let ls = cs.label_size;
+            for (i, (p, c)) in pts.iter().enumerate() {
+                let b = [p[0] + r + 3.0, p[1] - ls * 0.6, text_width(&c.name_fr, ls), ls * 1.2];
+                let hit = placed.iter().enumerate().any(|(j, o)| j != i && !(b[0] + b[2] < o[0] || o[0] + o[2] < b[0] || b[1] + b[3] < o[1] || o[1] + o[3] < b[1]));
+                if hit {
+                    continue;
+                }
+                placed.push(b);
+                out.push(Prim::Text { pos: [p[0] + r + 3.0, p[1]], text: c.name_fr.clone(), size: ls, color: cs.label_color, align: HAlign::Left, rot: 0.0, bold: false, italic: false, halo: Some([255, 255, 255, 210]) });
+            }
         }
     }
     if m.country_labels {

@@ -55,3 +55,9 @@ sh install.sh                       # installe, ou met à jour si déjà install
 - **Aide > Ouvrir les logs** : journal dans `~/.local/share/ecarte/ecarte.log` (démarrage, enregistrements, exports, synchronisations, plantages).
 - Les boîtes de dialogue de fichiers utilisent GTK3 sous Linux (pas de portail XDG requis).
 - Depuis un clone du dépôt : `git pull && ./install.sh` installe les dépendances manquantes (apt) puis la dernière release.
+
+## Capitales
+
+- Onglet **Carte > Capitales** : *Aucune*, *Points* ou *Points + noms* (forme, taille, couleurs, seulement les pays coloriés). Les noms qui se chevauchent sont masqués (les plus peuplées d'abord).
+- Outil **Capitale** (touche M) : clic sur un pays -> point à sa capitale, avec ou sans nom, modifiable ensuite comme n'importe quel élément.
+- 215 capitales intégrées (Natural Earth), donc disponibles hors ligne.

@@ -173,11 +173,53 @@ mod tests {
 /// Ensemble des données chargées : fond (pays) + couches additionnelles par identifiant.
 pub struct Data {
     pub base: std::sync::Arc<World>,
+    pub capitals: std::sync::Arc<Vec<Capital>>,
     pub layers: std::collections::HashMap<String, std::sync::Arc<World>>,
 }
 
 impl Data {
     pub fn embedded_only() -> Data {
-        Data { base: std::sync::Arc::new(World::embedded()), layers: Default::default() }
+        Data { base: std::sync::Arc::new(World::embedded()), capitals: std::sync::Arc::new(crate::data::capitals()), layers: Default::default() }
     }
+}
+
+/// Capitale d'un pays (Natural Earth, villes « Admin-0 capital »).
+#[derive(Clone, Debug)]
+pub struct Capital {
+    pub name: String,
+    pub name_fr: String,
+    pub iso: String,
+    pub lon: f64,
+    pub lat: f64,
+    pub pop: f64,
+    /// Seconde capitale d'un pays (ex. La Paz / Sucre).
+    pub alt: bool,
+}
+
+pub fn capitals_from_geojson(text: &str) -> Vec<Capital> {
+    let Ok(root) = serde_json::from_str::<Value>(text) else { return vec![] };
+    let Some(feats) = root.get("features").and_then(|f| f.as_array()) else { return vec![] };
+    let mut out = Vec::new();
+    for f in feats {
+        let Some(props) = f.get("properties") else { continue };
+        let s = |k: &str| props.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let class = s("FEATURECLA");
+        if !class.starts_with("Admin-0 capital") {
+            continue;
+        }
+        let Some(c) = f.get("geometry").and_then(|g| g.get("coordinates")).and_then(|c| c.as_array()) else { continue };
+        let (Some(lon), Some(lat)) = (c.first().and_then(|v| v.as_f64()), c.get(1).and_then(|v| v.as_f64())) else { continue };
+        let name = s("NAME");
+        let name_fr = if s("NAME_FR").is_empty() { name.clone() } else { s("NAME_FR") };
+        out.push(Capital {
+            name,
+            name_fr,
+            iso: s("ADM0_A3"),
+            lon,
+            lat,
+            pop: props.get("POP_MAX").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            alt: class.ends_with("alt"),
+        });
+    }
+    out
 }

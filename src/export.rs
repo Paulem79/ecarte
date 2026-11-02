@@ -110,6 +110,7 @@ mod manual {
         d.map.center_lon = 12.0;
         d.map.center_lat = 52.0;
         d.map.country_colors.insert("FRA".into(), [220, 120, 90, 255]);
+        d.map.capitals.mode = CapMode::PointsAndNames;
         d.map.country_labels = true;
         d.legend.visible = true;
         d.legend.entries.push(([220, 120, 90, 255], "France".into()));

@@ -290,3 +290,22 @@ mod live {
         assert!(load("lakes_50m").unwrap().countries.len() > 50);
     }
 }
+
+static CAPITALS: &[u8] = include_bytes!("../data/ne_110m_capitals.geojson");
+
+/// Capitales des pays (intégrées, toujours disponibles hors ligne).
+pub fn capitals() -> Vec<crate::world::Capital> {
+    crate::world::capitals_from_geojson(std::str::from_utf8(CAPITALS).unwrap_or("{}"))
+}
+
+#[cfg(test)]
+mod cap_tests {
+    #[test]
+    fn capitals_embedded() {
+        let c = super::capitals();
+        assert!(c.len() > 200, "{}", c.len());
+        let paris = c.iter().find(|c| c.iso == "FRA").expect("FRA");
+        assert_eq!(paris.name_fr, "Paris");
+        assert!(c.iter().filter(|c| c.iso == "BOL").count() >= 2); // La Paz + Sucre (alt)
+    }
+}
