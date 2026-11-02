@@ -173,8 +173,18 @@ command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t 
 
 echo "$LATEST" > "$TAG_FILE"
 
-# PATH : ~/.local/bin
-case ":$PATH:" in *":${BIN_DIR}:"*) ;; *) say "Astuce : ajoutez ${BIN_DIR} à votre PATH (déjà fait par défaut sur antiX en nouvelle session)." ;; esac
+# PATH : ajoute ~/.local/bin aux shells de l'utilisateur (idempotent)
+case ":$PATH:" in
+  *":${BIN_DIR}:"*) ;;
+  *)
+    for rc in "${HOME}/.bashrc" "${HOME}/.profile"; do
+      if [ -f "$rc" ] && ! grep -q "# ecarte-path" "$rc"; then
+        printf '\n# ecarte-path\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$rc"
+      fi
+    done
+    say "~/.local/bin ajouté à ~/.bashrc : ouvrez un nouveau terminal, ou tapez :  export PATH=\"\$HOME/.local/bin:\$PATH\""
+    ;;
+esac
 
 # Bibliothèques manquantes ?
 if command -v ldd >/dev/null 2>&1; then
