@@ -535,13 +535,13 @@ impl EcarteApp {
                     if ui.selectable_label(sel == Some(it.id), &it.name).clicked() {
                         sel = Some(it.id);
                     }
-                    if ui.small_button("▲").clicked() && i + 1 < n {
+                    if ui.small_button("^").clicked() && i + 1 < n {
                         swap = Some((i, i + 1));
                     }
-                    if ui.small_button("▼").clicked() && i > 0 {
+                    if ui.small_button("v").clicked() && i > 0 {
                         swap = Some((i, i - 1));
                     }
-                    if ui.small_button("✖").clicked() {
+                    if ui.small_button("x").clicked() {
                         del = Some(i);
                     }
                 });
@@ -649,7 +649,7 @@ impl EcarteApp {
             ui.horizontal(|ui| {
                 ui.color_edit_button_srgba_unmultiplied(c);
                 ui.text_edit_singleline(t);
-                if ui.small_button("✖").clicked() {
+                if ui.small_button("x").clicked() {
                     del = Some(i);
                 }
             });
@@ -1202,40 +1202,50 @@ impl eframe::App for EcarteApp {
             });
         });
 
-        egui::Panel::left("tools").resizable(false).exact_size(78.0).show_inside(ui, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.columns(2, |cols| {
-                    for (i, (t, icon, tip)) in Tool::ALL.iter().enumerate() {
-                        let ui = &mut cols[i % 2];
-                        let b = egui::Button::new(egui::RichText::new(*icon).size(17.0)).min_size(Vec2::new(30.0, 30.0)).selected(self.tool == *t);
-                        if ui.add(b).on_hover_text(*tip).clicked() {
+        egui::Panel::left("tools").resizable(true).default_size(112.0).size_range(64.0..=300.0).show_inside(ui, |ui| {
+            egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::splat(4.0);
+                    for (t, _, tip) in Tool::ALL.iter() {
+                        let (rect, resp) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::click());
+                        let sel = self.tool == *t;
+                        let bg = if sel {
+                            Color32::from_rgb(40, 100, 200)
+                        } else if resp.hovered() {
+                            Color32::from_gray(75)
+                        } else {
+                            Color32::from_gray(52)
+                        };
+                        ui.painter().rect_filled(rect, 4.0, bg);
+                        draw_tool_icon(ui.painter(), rect.shrink(7.0), *t, Color32::WHITE);
+                        if resp.on_hover_text(*tip).clicked() {
                             self.tool = *t;
                             self.draft.clear();
                         }
                     }
                 });
+                ui.separator();
+                ui.label("Style");
+                ui.horizontal_wrapped(|ui| {
+                    ui.color_edit_button_srgba_unmultiplied(&mut self.cur_stroke).on_hover_text("Contour");
+                    ui.color_edit_button_srgba_unmultiplied(&mut self.cur_fill).on_hover_text("Remplissage");
+                });
+                ui.add(egui::DragValue::new(&mut self.cur_width).range(0.5..=20.0).speed(0.1).prefix("trait "));
+                if self.tool == Tool::Paint {
+                    ui.label("Couleur du pays");
+                    ui.color_edit_button_srgba_unmultiplied(&mut self.paint_color);
+                }
             });
-            ui.separator();
-            ui.label("Style");
-            ui.horizontal(|ui| {
-                ui.color_edit_button_srgba_unmultiplied(&mut self.cur_stroke);
-                ui.color_edit_button_srgba_unmultiplied(&mut self.cur_fill);
-            });
-            ui.add(egui::DragValue::new(&mut self.cur_width).range(0.5..=20.0).speed(0.1));
-            if self.tool == Tool::Paint {
-                ui.label("Pays");
-                ui.color_edit_button_srgba_unmultiplied(&mut self.paint_color);
-            }
         });
 
-        egui::Panel::right("props").default_size(330.0).show_inside(ui, |ui| {
+        egui::Panel::right("props").resizable(true).default_size(310.0).size_range(200.0..=700.0).show_inside(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 for (t, n) in [(Tab::Map, "Carte"), (Tab::Page, "Page"), (Tab::Items, "Éléments"), (Tab::Legend, "Légende"), (Tab::Data, "Données"), (Tab::Export, "Export")] {
                     ui.selectable_value(&mut self.tab, t, n);
                 }
             });
             ui.separator();
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.tab {
+            egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| match self.tab {
                 Tab::Map => self.panel_map(ui),
                 Tab::Page => self.panel_page(ui),
                 Tab::Items => self.panel_items(ui),
@@ -1432,7 +1442,7 @@ impl EcarteApp {
         }
         ui.separator();
         ui.horizontal(|ui| {
-            if ui.add_enabled(!busy, egui::Button::new("⟳ Synchroniser (mises à jour)")).clicked() {
+            if ui.add_enabled(!busy, egui::Button::new("Synchroniser (mises à jour)")).clicked() {
                 dl.extend(Self::cached_ids());
             }
             if busy {
@@ -1463,9 +1473,65 @@ fn status_and_button(ui: &mut egui::Ui, d: &'static data::Dataset, av: Availabil
         }
         Availability::Missing => {
             let mo = (d.approx_kb as f32 / 1024.0 * 10.0).ceil() / 10.0;
-            if ui.add_enabled(!busy, egui::Button::new(format!("⬇ {mo} Mo"))).clicked() {
+            if ui.add_enabled(!busy, egui::Button::new(format!("Télécharger ({mo} Mo)"))).clicked() {
                 dl.push(d.id);
             }
         }
     }
+}
+
+/// Icônes d'outils dessinées en vectoriel (aucune dépendance aux glyphes de la police).
+fn draw_tool_icon(p: &egui::Painter, r: Rect, tool: Tool, c: Color32) {
+    let st = epaint::Stroke::new(1.8, c);
+    let add = |s: epaint::Shape| {
+        p.add(s);
+    };
+    let pt = |x: f32, y: f32| Pos2::new(r.left() + x * r.width(), r.top() + y * r.height());
+    match tool {
+        Tool::Select => add(epaint::Shape::convex_polygon(
+            vec![pt(0.1, 0.0), pt(0.1, 0.9), pt(0.35, 0.68), pt(0.55, 1.0), pt(0.7, 0.9), pt(0.5, 0.6), pt(0.85, 0.55)],
+            c,
+            epaint::Stroke::NONE,
+        )),
+        Tool::Pan => {
+            p.line_segment([pt(0.5, 0.0), pt(0.5, 1.0)], st);
+            p.line_segment([pt(0.0, 0.5), pt(1.0, 0.5)], st);
+            for (a, b, d) in [
+                (pt(0.5, 0.0), Vec2::new(-0.2, 0.2), Vec2::new(0.2, 0.2)),
+                (pt(0.5, 1.0), Vec2::new(-0.2, -0.2), Vec2::new(0.2, -0.2)),
+                (pt(0.0, 0.5), Vec2::new(0.2, -0.2), Vec2::new(0.2, 0.2)),
+                (pt(1.0, 0.5), Vec2::new(-0.2, -0.2), Vec2::new(-0.2, 0.2)),
+            ] {
+                let s = r.width();
+                add(epaint::Shape::convex_polygon(vec![a, a + b * s, a + d * s], c, epaint::Stroke::NONE));
+            }
+        }
+        Tool::Text => {
+            p.line_segment([pt(0.05, 0.05), pt(0.95, 0.05)], st);
+            p.line_segment([pt(0.5, 0.05), pt(0.5, 0.95)], st);
+            p.line_segment([pt(0.3, 0.95), pt(0.7, 0.95)], st);
+        }
+        Tool::Point => {
+            p.circle_filled(r.center(), r.width() * 0.32, c);
+        }
+        Tool::Circle => {
+            p.circle_stroke(r.center(), r.width() * 0.48, st);
+        }
+        Tool::Line => {
+            p.line_segment([pt(0.05, 0.95), pt(0.95, 0.05)], st);
+        }
+        Tool::Arrow => {
+            p.line_segment([pt(0.0, 1.0), pt(0.8, 0.2)], st);
+            add(epaint::Shape::convex_polygon(vec![pt(1.0, 0.0), pt(0.62, 0.12), pt(0.88, 0.38)], c, epaint::Stroke::NONE));
+        }
+        Tool::Polyline => add(epaint::Shape::line(vec![pt(0.0, 0.9), pt(0.3, 0.2), pt(0.6, 0.8), pt(1.0, 0.1)], st)),
+        Tool::Rect => {
+            p.rect_stroke(r.shrink(1.0), 1.0, st, epaint::StrokeKind::Inside);
+        }
+        Tool::Polygon => add(epaint::Shape::closed_line(vec![pt(0.5, 0.0), pt(1.0, 0.38), pt(0.82, 1.0), pt(0.18, 1.0), pt(0.0, 0.38)], st)),
+        Tool::Paint => {
+            p.line_segment([pt(0.95, 0.05), pt(0.45, 0.55)], epaint::Stroke::new(3.0, c));
+            add(epaint::Shape::convex_polygon(vec![pt(0.5, 0.45), pt(0.6, 0.6), pt(0.1, 0.98), pt(0.02, 0.88)], c, epaint::Stroke::NONE));
+        }
+    };
 }
