@@ -65,6 +65,7 @@ enum Drag {
     None,
     Pan,
     Move { orig: Item, start: P },
+    Handle { orig: Item, kind: scene::HandleKind },
     Create { id: u32, start: P },
 }
 
@@ -900,6 +901,15 @@ impl EcarteApp {
             } else if let (Some(start), true) = (press, resp.dragged_by(egui::PointerButton::Primary)) {
                 match tool {
                     Tool::Select => {
+                        let hit_handle = self.selected.and_then(|id| self.doc.items.iter().find(|i| i.id == id)).and_then(|it| {
+                            scene::handles(&view, it)
+                                .into_iter()
+                                .find(|(p, _)| (p[0] - start[0]).hypot(p[1] - start[1]) <= 9.0 / s)
+                                .map(|(_, k)| (it.clone(), k))
+                        });
+                        if let Some((orig, kind)) = hit_handle {
+                            self.drag = Drag::Handle { orig, kind };
+                        } else {
                         let found = self.doc.items.iter().rev().filter(|i| i.visible).find(|it| {
                             scene::item_shape(&view, it).is_some_and(|sh| scene::hit(&sh, start, tol + it.width / 2.0, it.fill[3] > 0))
                         });
@@ -912,6 +922,7 @@ impl EcarteApp {
                                 self.selected = None;
                                 self.drag = Drag::Pan;
                             }
+                        }
                         }
                     }
                     Tool::Circle | Tool::Line | Tool::Arrow | Tool::Rect => {
@@ -950,6 +961,14 @@ impl EcarteApp {
                         let moved = scene::moved(&view, orig, cur[0] - start[0], cur[1] - start[1]);
                         if let Some(it) = self.doc.item_mut(orig.id) {
                             it.kind = moved.kind;
+                        }
+                    }
+                }
+                Drag::Handle { orig, kind } => {
+                    if let Some(cur) = pointer {
+                        let n = scene::apply_handle(&view, orig, *kind, cur);
+                        if let Some(it) = self.doc.item_mut(orig.id) {
+                            it.kind = n.kind;
                         }
                     }
                 }
@@ -1123,8 +1142,10 @@ impl EcarteApp {
                 let r = Rect::from_min_max(xf.to_screen([b[0], b[1]]), xf.to_screen([b[2], b[3]])).expand(5.0);
                 let st = epaint::Stroke::new(1.5, Color32::from_rgb(40, 120, 255));
                 painter.extend(epaint::Shape::dashed_line(&[r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()], st, 5.0, 4.0));
-                for c in [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()] {
-                    painter.rect_filled(Rect::from_center_size(c, Vec2::splat(6.0)), 1.0, Color32::from_rgb(40, 120, 255));
+                for (hp, _) in scene::handles(&view, it) {
+                    let hr = Rect::from_center_size(xf.to_screen(hp), Vec2::splat(9.0));
+                    painter.rect_filled(hr, 1.0, Color32::WHITE);
+                    painter.rect_stroke(hr, 1.0, epaint::Stroke::new(1.5, Color32::from_rgb(40, 120, 255)), epaint::StrokeKind::Inside);
                 }
             }
         }
@@ -1143,11 +1164,7 @@ impl EcarteApp {
                 painter.circle_filled(h + Vec2::new(14.0, 14.0), 7.0, c32(self.paint_color));
             }
         }
-        if matches!(tool, Tool::Pan) {
-            ctx.set_cursor_icon(egui::CursorIcon::Grab);
-        } else if tool != Tool::Select {
-            ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
-        }
+        self.apply_cursor(&ctx, &view, tool, hover, s, resp.hovered());
         painter.text(avail.right_bottom() - Vec2::new(8.0, 6.0), Align2::RIGHT_BOTTOM, "", FontId::default(), Color32::WHITE);
     }
 
@@ -1642,5 +1659,77 @@ impl EcarteApp {
         }
         self.selected = Some(id);
         self.status = format!("{} (capitale de {cname})", cap.name_fr);
+    }
+}
+
+fn handle_cursor(item: &Item, view: &View, kind: scene::HandleKind) -> egui::CursorIcon {
+    use egui::CursorIcon::*;
+    match kind {
+        scene::HandleKind::Corner(c) => {
+            if c % 2 == 0 { ResizeNwSe } else { ResizeNeSw }
+        }
+        scene::HandleKind::Radius => ResizeHorizontal,
+        scene::HandleKind::TextSize => ResizeNwSe,
+        scene::HandleKind::Vertex(i) => {
+            let pts: Vec<P> = scene::positions(&item.kind).iter().filter_map(|p| view.pos_to_page(p)).collect();
+            let n = pts.len();
+            if n < 2 || i >= n {
+                return Crosshair;
+            }
+            let j = if i + 1 < n { i + 1 } else { i - 1 };
+            let (dx, dy) = (pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]);
+            let a = dy.atan2(dx).to_degrees().rem_euclid(180.0);
+            if !(22.5..157.5).contains(&a) {
+                ResizeHorizontal
+            } else if a < 67.5 {
+                ResizeNwSe
+            } else if a < 112.5 {
+                ResizeVertical
+            } else {
+                ResizeNeSw
+            }
+        }
+    }
+}
+
+impl EcarteApp {
+    /// Curseur selon l'interaction possible : poignée (redimensionnement), objet (déplacement), carte (saisie), outil de dessin.
+    fn apply_cursor(&self, ctx: &egui::Context, view: &View, tool: Tool, hover: Option<P>, s: f32, hovered: bool) {
+        use egui::CursorIcon as C;
+        let selected = self.selected.and_then(|id| self.doc.items.iter().find(|i| i.id == id));
+        let cursor = match &self.drag {
+            Drag::Pan => Some(C::Grabbing),
+            Drag::Move { .. } => Some(C::Move),
+            Drag::Handle { orig, kind } => Some(handle_cursor(orig, view, *kind)),
+            Drag::Create { .. } => Some(C::Crosshair),
+            Drag::None if !hovered => None,
+            Drag::None => match tool {
+                Tool::Select => hover.and_then(|h| {
+                    let on_handle = selected.and_then(|it| {
+                        scene::handles(view, it)
+                            .into_iter()
+                            .find(|(p, _)| (p[0] - h[0]).hypot(p[1] - h[1]) <= 9.0 / s)
+                            .map(|(_, k)| handle_cursor(it, view, k))
+                    });
+                    on_handle.or_else(|| {
+                        let tol = 7.0 / s;
+                        let over = self
+                            .doc
+                            .items
+                            .iter()
+                            .rev()
+                            .filter(|i| i.visible)
+                            .any(|it| scene::item_shape(view, it).is_some_and(|sh| scene::hit(&sh, h, tol + it.width / 2.0, it.fill[3] > 0)));
+                        Some(if over { C::Move } else { C::Grab })
+                    })
+                }),
+                Tool::Pan => Some(C::Grab),
+                Tool::Text => Some(C::Text),
+                _ => Some(C::Crosshair),
+            },
+        };
+        if let Some(c) = cursor {
+            ctx.set_cursor_icon(c);
+        }
     }
 }

@@ -1037,3 +1037,154 @@ mod tests {
         assert!((lo - 5.0).abs() < 1e-3 && (la - 45.0).abs() < 1e-3);
     }
 }
+
+// ---------------------------------------------------------------- Poignées de redimensionnement
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum HandleKind {
+    /// Sommet d'une ligne / flèche / polygone.
+    Vertex(usize),
+    /// Coin d'un rectangle (0 = A, 1 = (Bx,Ay), 2 = B, 3 = (Ax,By)).
+    Corner(usize),
+    /// Rayon d'un cercle ou d'un point.
+    Radius,
+    /// Taille d'un texte.
+    TextSize,
+}
+
+pub fn handles(view: &View, item: &Item) -> Vec<(P, HandleKind)> {
+    match &item.kind {
+        Kind::Line { pts, .. } | Kind::Polygon { pts } => pts
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| view.pos_to_page(p).map(|q| (q, HandleKind::Vertex(i))))
+            .collect(),
+        Kind::Rect { a, b } => {
+            let (Some(a), Some(b)) = (view.pos_to_page(a), view.pos_to_page(b)) else { return vec![] };
+            vec![(a, HandleKind::Corner(0)), ([b[0], a[1]], HandleKind::Corner(1)), (b, HandleKind::Corner(2)), ([a[0], b[1]], HandleKind::Corner(3))]
+        }
+        Kind::Circle { center, radius, unit } => match (unit, center) {
+            (RadiusUnit::Km, Pos::Geo { lon, lat }) => {
+                let ring = km_circle(view, *lon, *lat, *radius as f64);
+                if ring.len() == 72 { vec![(ring[18], HandleKind::Radius)] } else { vec![] }
+            }
+            _ => view.pos_to_page(center).map(|c| vec![([c[0] + radius, c[1]], HandleKind::Radius)]).unwrap_or_default(),
+        },
+        Kind::Point { pos, radius, .. } => view.pos_to_page(pos).map(|c| vec![([c[0] + radius, c[1]], HandleKind::Radius)]).unwrap_or_default(),
+        Kind::Text { .. } => match item_shape(view, item) {
+            Some(Shape::TextBox(b)) => vec![([b[0] + b[2], b[1] + b[3]], HandleKind::TextSize)],
+            _ => vec![],
+        },
+    }
+}
+
+fn rebuild_pos(view: &View, orig: &Pos, p: P) -> Pos {
+    match orig {
+        Pos::Page { .. } => Pos::Page { x: p[0], y: p[1] },
+        Pos::Geo { .. } => view.unproject(p).map(|(lon, lat)| Pos::Geo { lon, lat }).unwrap_or(*orig),
+    }
+}
+
+/// Copie de `orig` modifiée comme si la poignée `kind` était amenée en `cur` (pixels de page).
+pub fn apply_handle(view: &View, orig: &Item, kind: HandleKind, cur: P) -> Item {
+    let mut it = orig.clone();
+    let orig_box = match item_shape(view, orig) {
+        Some(Shape::TextBox(b)) => Some(b),
+        _ => None,
+    };
+    match (&mut it.kind, kind) {
+        (Kind::Line { pts, .. } | Kind::Polygon { pts }, HandleKind::Vertex(i)) => {
+            if let Some(p) = pts.get(i) {
+                let np = rebuild_pos(view, p, cur);
+                pts[i] = np;
+            }
+        }
+        (Kind::Rect { a, b }, HandleKind::Corner(c)) => {
+            let (Some(ap), Some(bp)) = (view.pos_to_page(a), view.pos_to_page(b)) else { return it };
+            match c {
+                0 => *a = rebuild_pos(view, a, cur),
+                2 => *b = rebuild_pos(view, b, cur),
+                1 => {
+                    let (na, nb) = (rebuild_pos(view, a, [ap[0], cur[1]]), rebuild_pos(view, b, [cur[0], bp[1]]));
+                    *a = na;
+                    *b = nb;
+                }
+                _ => {
+                    let (na, nb) = (rebuild_pos(view, a, [cur[0], ap[1]]), rebuild_pos(view, b, [bp[0], cur[1]]));
+                    *a = na;
+                    *b = nb;
+                }
+            }
+        }
+        (Kind::Circle { center, radius, unit }, HandleKind::Radius) => match (&*unit, &*center) {
+            (RadiusUnit::Km, Pos::Geo { lon, lat }) => {
+                if let Some(g) = view.unproject(cur) {
+                    *radius = haversine_km((*lon, *lat), g) as f32;
+                }
+            }
+            _ => {
+                if let Some(c) = view.pos_to_page(center) {
+                    *radius = (cur[0] - c[0]).hypot(cur[1] - c[1]);
+                }
+            }
+        },
+        (Kind::Point { pos, radius, .. }, HandleKind::Radius) => {
+            if let Some(c) = view.pos_to_page(pos) {
+                *radius = (cur[0] - c[0]).hypot(cur[1] - c[1]).clamp(2.0, 80.0);
+            }
+        }
+        (Kind::Text { size, .. }, HandleKind::TextSize) => {
+            if let Some(b) = orig_box {
+                let d0 = b[2].hypot(b[3]).max(1.0);
+                let d1 = (cur[0] - b[0]).hypot(cur[1] - b[1]);
+                *size = (*size * d1 / d0).clamp(6.0, 300.0);
+            }
+        }
+        _ => {}
+    }
+    it
+}
+
+#[cfg(test)]
+mod handle_tests {
+    use super::*;
+
+    fn pg(x: f32, y: f32) -> Pos {
+        Pos::Page { x, y }
+    }
+
+    #[test]
+    fn resizing_does_not_move_the_item() {
+        let d = Document::default();
+        let v = View::new(&d);
+        let line = Item { id: 1, name: "f".into(), visible: true, stroke: [0; 4], fill: [0; 4], width: 3.0, dashed: false, kind: Kind::Line { pts: vec![pg(100.0, 100.0), pg(300.0, 200.0)], arrow_start: false, arrow_end: true, geodesic: false } };
+        let hs = handles(&v, &line);
+        assert_eq!(hs.len(), 2);
+        let out = apply_handle(&v, &line, HandleKind::Vertex(1), [400.0, 250.0]);
+        match out.kind {
+            Kind::Line { pts, .. } => {
+                assert_eq!(pts[0], pg(100.0, 100.0)); // l'autre extrémité ne bouge pas
+                assert_eq!(pts[1], pg(400.0, 250.0));
+            }
+            _ => panic!(),
+        }
+        let rect = Item { kind: Kind::Rect { a: pg(10.0, 10.0), b: pg(110.0, 60.0) }, ..line.clone() };
+        let r = apply_handle(&v, &rect, HandleKind::Corner(2), [200.0, 100.0]);
+        assert_eq!(r.kind, Kind::Rect { a: pg(10.0, 10.0), b: pg(200.0, 100.0) });
+        let r = apply_handle(&v, &rect, HandleKind::Corner(1), [150.0, 0.0]);
+        assert_eq!(r.kind, Kind::Rect { a: pg(10.0, 0.0), b: pg(150.0, 60.0) });
+        let circ = Item { kind: Kind::Circle { center: pg(100.0, 100.0), radius: 20.0, unit: RadiusUnit::Px }, ..line.clone() };
+        let c = apply_handle(&v, &circ, HandleKind::Radius, [160.0, 100.0]);
+        assert_eq!(c.kind, Kind::Circle { center: pg(100.0, 100.0), radius: 60.0, unit: RadiusUnit::Px });
+        let txt = Item { kind: Kind::Text { pos: pg(300.0, 300.0), text: "abc".into(), size: 20.0, bold: false, italic: false, rot: 0.0, halo: false, align: HAlign::Left }, ..line };
+        let hs = handles(&v, &txt);
+        let t = apply_handle(&v, &txt, HandleKind::TextSize, [hs[0].0[0] + 30.0, hs[0].0[1] + 20.0]);
+        match t.kind {
+            Kind::Text { size, pos, .. } => {
+                assert!(size > 20.0);
+                assert_eq!(pos, pg(300.0, 300.0));
+            }
+            _ => panic!(),
+        }
+    }
+}
