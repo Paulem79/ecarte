@@ -85,7 +85,7 @@ Connectez-vous avec :  gh auth login
 ou placez un jeton dans ${TOKEN_FILE}  (chmod 600), ou exportez GITHUB_TOKEN."
 fi
 
-if [ "$FORCE" = 0 ] && [ -f "$TAG_FILE" ] && [ "$(cat "$TAG_FILE")" = "$LATEST" ] && [ -x "${BIN_DIR}/ecarte" ]; then
+if [ "$FORCE" = 0 ] && [ -f "$TAG_FILE" ] && [ "$(cat "$TAG_FILE")" = "$LATEST" ] && [ -f "${BIN_DIR}/ecarte" ]; then
   say "Déjà à jour ($LATEST). Utilisez --force pour réinstaller."
   exit 0
 fi
