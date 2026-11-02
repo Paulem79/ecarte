@@ -145,8 +145,8 @@ fn looks_like_executable(b: &[u8]) -> bool {
     }
 }
 
-/// Télécharge la release et remplace l'exécutable courant. L'application doit ensuite être relancée.
-pub fn install(rel: &Release) -> Result<(), String> {
+/// Télécharge et valide le binaire de la release (sans rien remplacer).
+pub fn download(rel: &Release) -> Result<Vec<u8>, String> {
     let tok = token();
     let mut resp = request(&rel.asset_url, "application/octet-stream", &tok)?;
     let bytes = resp.body_mut().with_config().limit(300 * 1024 * 1024).read_to_vec().map_err(|e| e.to_string())?;
@@ -156,6 +156,12 @@ pub fn install(rel: &Release) -> Result<(), String> {
     if !looks_like_executable(&bytes) {
         return Err("le fichier téléchargé n'est pas un exécutable valide".into());
     }
+    Ok(bytes)
+}
+
+/// Télécharge la release et remplace l'exécutable courant. L'application doit ensuite être relancée.
+pub fn install(rel: &Release) -> Result<(), String> {
+    let bytes = download(rel)?;
     let exe = exe_path();
     let dir = exe.parent().ok_or("dossier de l'exécutable introuvable")?;
     let mut tmp = exe.clone().into_os_string();
@@ -211,5 +217,22 @@ mod tests {
         if CURRENT == "dev" {
             assert!(check().unwrap().is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod live {
+    use super::*;
+
+    /// Nécessite un accès GitHub (jeton ou gh) et ECARTE_BUILD_TAG=build-1-test à la compilation.
+    #[test]
+    #[ignore]
+    fn check_and_download_live() {
+        assert_eq!(build_number(CURRENT), Some(1), "compiler avec ECARTE_BUILD_TAG=build-1-test");
+        let rel = check().expect("check").expect("une release plus récente doit exister");
+        println!("release {} asset {} ({} octets)", rel.tag, rel.asset_url, rel.asset_size);
+        let bytes = download(&rel).expect("download");
+        assert_eq!(bytes.len() as u64, rel.asset_size);
+        println!("téléchargé {} octets, exécutable valide", bytes.len());
     }
 }
