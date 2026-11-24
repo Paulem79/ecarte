@@ -12,10 +12,12 @@ pub enum Projection {
     AzimuthalEqualArea,
     Stereographic,
     LambertConic,
+    /// Azimutale équidistante centrée sur un pôle (Nord par défaut, Sud si `lat0 < 0`).
+    Polar,
 }
 
 impl Projection {
-    pub const ALL: [Projection; 8] = [
+    pub const ALL: [Projection; 9] = [
         Projection::Equirectangular,
         Projection::Mercator,
         Projection::Sinusoidal,
@@ -24,6 +26,7 @@ impl Projection {
         Projection::AzimuthalEqualArea,
         Projection::Stereographic,
         Projection::LambertConic,
+        Projection::Polar,
     ];
 
     pub fn label(self) -> &'static str {
@@ -36,13 +39,17 @@ impl Projection {
             Projection::AzimuthalEqualArea => "Azimutale équivalente de Lambert",
             Projection::Stereographic => "Stéréographique",
             Projection::LambertConic => "Conique conforme de Lambert",
+            Projection::Polar => "Polaire (azimutale équidistante)",
         }
     }
 
     pub fn is_azimuthal(self) -> bool {
         matches!(
             self,
-            Projection::Orthographic | Projection::AzimuthalEqualArea | Projection::Stereographic
+            Projection::Orthographic
+                | Projection::AzimuthalEqualArea
+                | Projection::Stereographic
+                | Projection::Polar
         )
     }
 
@@ -57,6 +64,11 @@ impl Projection {
         )
     }
 
+    /// Vrai si la projection est centrée sur un pôle (le signe de `lat0` choisit le pôle).
+    pub fn is_polar(self) -> bool {
+        self == Projection::Polar
+    }
+
     /// Emprise (largeur, hauteur) projetée du « monde entier » pour le cadrage initial.
     pub fn fit_extent(self) -> (f64, f64) {
         match self {
@@ -67,6 +79,8 @@ impl Projection {
             Projection::AzimuthalEqualArea => (4.0, 4.0),
             Projection::Stereographic => (6.0, 6.0),
             Projection::LambertConic => (4.0, 4.0),
+            // Disque de rayon π (distance de l'autre pôle).
+            Projection::Polar => (2.0 * PI, 2.0 * PI),
         }
     }
 
@@ -101,7 +115,13 @@ fn tan_q(lat: f64) -> f64 {
 impl Proj {
     pub fn new(pa: Params) -> Self {
         let l0 = pa.lon0.to_radians();
-        let f0 = pa.lat0.to_radians();
+        // Une projection polaire est toujours centrée sur l'un des deux pôles :
+        // le signe de lat0 choisit le pôle, sa valeur exacte est ramenée à ±90°.
+        let f0 = if pa.proj == Projection::Polar {
+            if pa.lat0 >= 0.0 { FRAC_PI_2 } else { -FRAC_PI_2 }
+        } else {
+            pa.lat0.to_radians()
+        };
         let (mut n, mut f, mut rho0) = (0.0, 0.0, 0.0);
         if pa.proj == Projection::LambertConic {
             let p1 = pa.std1.clamp(-85.0, 85.0).to_radians();
@@ -186,6 +206,14 @@ impl Proj {
                 let th = self.n * dl;
                 Some((rho * th.sin(), self.rho0 - rho * th.cos()))
             }
+            Projection::Polar => {
+                // Azimutale équidistante : la distance au pôle est l'angle polaire.
+                // Pôle Nord : r = π/2 - φ, y = -r cos(Δλ) (le sud est en bas).
+                // Pôle Sud : r = π/2 + φ, y = +r cos(Δλ) (le nord est en haut).
+                let s = if self.f0 >= 0.0 { 1.0 } else { -1.0 };
+                let r = (FRAC_PI_2 - s * phi).clamp(0.0, PI);
+                Some((r * dl.sin(), -s * r * dl.cos()))
+            }
         }
     }
 
@@ -253,6 +281,17 @@ impl Proj {
                     2.0 * (self.f / rho).powf(1.0 / self.n).atan() - FRAC_PI_2
                 };
                 (th / self.n, phi)
+            }
+            Projection::Polar => {
+                let s = if self.f0 >= 0.0 { 1.0 } else { -1.0 };
+                let r = x.hypot(y);
+                if r > PI + 1e-9 {
+                    return None;
+                }
+                let phi = s * (FRAC_PI_2 - r.min(PI));
+                // Au pôle, la longitude est indéterminée : on choisit lon0.
+                let lam = if r < 1e-12 { 0.0 } else { x.atan2(-s * y) };
+                (lam, phi)
             }
         };
         if !lam.is_finite() || !phi.is_finite() || (lam.abs() > PI + 1e-6 && self.p.is_banded()) {
@@ -342,6 +381,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn polar_projections() {
+        for (lat0, pole) in [(90.0, 90.0), (-90.0, -90.0)] {
+            let pr = Proj::new(Params { proj: Projection::Polar, lon0: 10.0, lat0, std1: 0.0, std2: 0.0 });
+            // Le centre est le pôle, quelle que soit la latitude demandée.
+            let (x, y) = pr.forward(10.0, lat0, false).unwrap();
+            assert!(x.abs() < 1e-9 && y.abs() < 1e-9);
+            for &(lon, lat) in &[(12.0, 80.0), (-20.0, 40.0), (30.0, -20.0), (170.0, 5.0)] {
+                let (x, y) = pr.forward(lon, lat, false).expect("visible");
+                let (lo, la) = pr.inverse(x, y).expect("inverse");
+                assert!(
+                    (wrap_lon(lo - lon)).abs() < 1e-6 && (la - lat).abs() < 1e-6,
+                    "lat0={lat0} {lon},{lat} -> {lo},{la}"
+                );
+            }
+            // L'autre pôle est sur le limbe.
+            let (x, y) = pr.forward(10.0, -pole, false).unwrap();
+            assert!((x.hypot(y) - PI).abs() < 1e-6);
+        }
+        assert!(Projection::Polar.is_azimuthal());
+        assert!(!Projection::Polar.is_banded());
     }
 
     #[test]

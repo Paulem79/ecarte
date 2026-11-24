@@ -17,13 +17,17 @@ export **SVG / PNG / JPG**. Linux et Windows natifs.
 ## Fonctions
 
 - Projections : Mercator, équirectangulaire, sinusoïdale, Mollweide, orthographique, azimutale
-  équivalente, stéréographique, conique conforme de Lambert.
+  équivalente, stéréographique, conique conforme de Lambert, polaire (azimutale équidistante,
+  pôle Nord ou Sud).
 - Graticule : pas, couleur, pointillés, étiquettes sur les côtés choisis. Cadre simple / double / bandes alternées.
 - Éléments : texte (rotation, halo), points (6 formes), cercles en km ou px, lignes et flèches
-  (grand cercle optionnel), rectangles, polygones, polylignes ; ordre, visibilité, duplication, annuler/rétablir.
+  (grand cercle optionnel ; coupure correcte à l'antiméridien et aux zones masquées), rectangles,
+  polygones, polylignes ; ordre, visibilité, duplication, annuler/rétablir.
+- Villes : outil **Ville** (touche V) : recherche parmi 243 villes intégrées ou saisie libre de
+  coordonnées, puis point nommé placé sur la carte.
 - Fichiers `.ecarte` (JSON). Export PNG/JPG jusqu'à 600 dpi, SVG vectoriel.
 
-Raccourcis : molette = zoom carte ; ✋/clic milieu = déplacer ; S H T P C L A R G K = outils ;
+Raccourcis : molette = zoom carte ; ✋/clic milieu = déplacer ; S H T P C L A R G M V K = outils ;
 Ctrl+Z/Y, Ctrl+S, Ctrl+O, Suppr.
 
 ## Compiler

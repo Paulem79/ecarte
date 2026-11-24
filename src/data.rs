@@ -296,10 +296,64 @@ mod live {
 }
 
 static CAPITALS: &[u8] = include_bytes!("../data/ne_110m_capitals.geojson");
+static CITIES: &[u8] = include_bytes!("../data/ne_110m_populated_places.geojson");
 
 /// Capitales des pays (intégrées, toujours disponibles hors ligne).
 pub fn capitals() -> Vec<crate::world::Capital> {
     crate::world::capitals_from_geojson(std::str::from_utf8(CAPITALS).unwrap_or("{}"))
+}
+
+use crate::world::{City, cities_from_geojson, fold_text};
+use std::sync::OnceLock;
+
+fn all_cities() -> &'static [City] {
+    static LIST: OnceLock<Vec<City>> = OnceLock::new();
+    LIST.get_or_init(|| cities_from_geojson(std::str::from_utf8(CITIES).unwrap_or("{}")))
+}
+
+/// Villes intégrées (Natural Earth 1:110m), disponibles hors ligne.
+pub fn cities() -> Vec<City> {
+    all_cities().to_vec()
+}
+
+/// Recherche d'une ville par nom (français ou local) ou par pays.
+/// Les correspondances au début du nom sont classées en premier, puis les plus peuplées.
+pub fn find_cities(query: &str, limit: usize) -> Vec<City> {
+    let q = fold_text(query.trim());
+    let mut found: Vec<(u8, City)> = cities()
+        .into_iter()
+        .filter_map(|c| {
+            if q.is_empty() {
+                return Some((0, c));
+            }
+            let name = fold_text(&c.name_fr);
+            let local = fold_text(&c.name);
+            let country = fold_text(&c.country);
+            let rank = if name == q || local == q {
+                0
+            } else if name.starts_with(&q) || local.starts_with(&q) {
+                1
+            } else if name.contains(&q) || local.contains(&q) {
+                2
+            } else if country.contains(&q) {
+                3
+            } else {
+                return None;
+            };
+            Some((rank, c))
+        })
+        .collect();
+    found.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| b.1.pop.partial_cmp(&a.1.pop).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| a.1.name_fr.cmp(&b.1.name_fr))
+    });
+    found.into_iter().take(limit).map(|(_, c)| c).collect()
+}
+
+/// Alias de [`find_cities`] pour la recherche par nom.
+pub fn search_cities(query: &str, limit: usize) -> Vec<City> {
+    find_cities(query, limit)
 }
 
 #[cfg(test)]
@@ -311,5 +365,19 @@ mod cap_tests {
         let paris = c.iter().find(|c| c.iso == "FRA").expect("FRA");
         assert_eq!(paris.name_fr, "Paris");
         assert!(c.iter().filter(|c| c.iso == "BOL").count() >= 2); // La Paz + Sucre (alt)
+    }
+
+    #[test]
+    fn cities_embedded_and_searchable() {
+        let all = super::cities();
+        assert!(all.len() > 200, "{}", all.len());
+        let paris = all.iter().find(|c| c.iso == "FRA" && c.name == "Paris").expect("Paris");
+        assert!((paris.lon - 2.35).abs() < 0.1 && (paris.lat - 48.85).abs() < 0.1);
+        assert!(paris.capital);
+        let found = super::find_cities("paris", 5);
+        assert_eq!(found.first().map(|c| c.name.as_str()), Some("Paris"));
+        let found = super::find_cities("LONDRES", 5);
+        assert_eq!(found.first().map(|c| c.name.as_str()), Some("London"));
+        assert!(super::find_cities("zzzzz", 5).is_empty());
     }
 }

@@ -38,9 +38,16 @@ pub struct View {
 impl View {
     pub fn new(doc: &Document) -> View {
         let m = &doc.map;
-        let params = Params { proj: m.proj, lon0: m.center_lon, lat0: m.center_lat, std1: m.std1, std2: m.std2 };
+        let lat0 = if m.proj.is_polar() {
+            if m.center_lat >= 0.0 { 90.0 } else { -90.0 }
+        } else {
+            m.center_lat
+        };
+        let params = Params { proj: m.proj, lon0: m.center_lon, lat0, std1: m.std1, std2: m.std2 };
         let proj = Proj::new(params);
-        let (cx, cy) = proj.forward(m.center_lon, m.center_lat, true).unwrap_or((0.0, 0.0));
+        // `params.lat0` est la latitude réellement utilisée par la projection
+        // (ramenée à ±90° en polaire) : le centre du disque reste le pôle.
+        let (cx, cy) = proj.forward(m.center_lon, params.lat0, true).unwrap_or((0.0, 0.0));
         let (ew, eh) = m.proj.fit_extent();
         let fr = doc.frame_rect();
         let base = (fr[2] as f64 / ew).min(fr[3] as f64 / eh) * 0.98;
@@ -259,6 +266,23 @@ fn poly_prims(view: &View, poly: &Poly, fill: Option<Rgba>, stroke: Option<Strok
             rings.push(pts);
         }
         if !rings.is_empty() {
+            // En projection polaire, un pays qui contient le pôle opposé (l'Antarctique
+            // vue du pôle Nord) enveloppe tout le disque : on inverse son remplissage
+            // avec le limbe pour ne colorier que l'anneau qui lui correspond.
+            let center = view.xy_to_page(0.0, 0.0);
+            let inverted = view.params.proj.is_polar()
+                && view.params.lat0 >= 0.0 // pôle Nord : le pôle opposé est l'Antarctique
+                && fill.is_some()
+                && rings.first().is_some_and(|r| point_in_poly(center, r));
+            if inverted {
+                if let Some(limb) = sphere_outline(view) {
+                    let mut fill_rings = vec![limb];
+                    fill_rings.extend(rings.iter().cloned());
+                    out.push(Prim::Path { rings: fill_rings, closed: true, fill, stroke: None });
+                    out.push(Prim::Path { rings, closed: true, fill: None, stroke });
+                    continue;
+                }
+            }
             out.push(Prim::Path { rings, closed: true, fill, stroke });
         }
     }
@@ -322,8 +346,17 @@ fn sphere_outline(view: &View) -> Option<Vec<P>> {
         }
         pts.extend(view.project(hi, -ml, true));
         Some(pts)
-    } else if proj == Projection::Orthographic || proj == Projection::AzimuthalEqualArea {
-        let r = if proj == Projection::Orthographic { 1.0 } else { 2.0 };
+    } else if proj == Projection::Orthographic
+        || proj == Projection::AzimuthalEqualArea
+        || proj.is_polar()
+    {
+        let r = if proj == Projection::Orthographic {
+            1.0
+        } else if proj == Projection::Polar {
+            std::f64::consts::PI
+        } else {
+            2.0
+        };
         Some(
             (0..180)
                 .map(|i| {
@@ -459,19 +492,103 @@ pub fn moved(view: &View, item: &Item, dx: f32, dy: f32) -> Item {
     it
 }
 
-fn route(view: &View, pts: &[Pos], geodesic: bool) -> Vec<P> {
-    let mut out = Vec::new();
-    for (i, p) in pts.iter().enumerate() {
-        if geodesic && i > 0 {
-            if let (Pos::Geo { lon: a, lat: b }, Pos::Geo { lon: c, lat: d }) = (&pts[i - 1], p) {
-                let gc = great_circle((*a, *b), (*c, *d), 2.0);
-                out.extend(gc.iter().skip(1).filter_map(|&(lo, la)| view.project(lo, la, false)));
-                continue;
+/// Trace une ligne en segments continus.
+///
+/// Un segment s'arrête dès qu'un point est masqué (globe) ou que la ligne
+/// franchit un bord de la bande (antiméridien) : on ne relie jamais deux
+/// points éloignés à travers toute la carte. Les longitudes géographiques
+/// sont déroulées pour rester continues d'un sommet à l'autre.
+fn route(view: &View, pts: &[Pos], geodesic: bool) -> Vec<Vec<P>> {
+    let banded = view.params.proj.is_banded();
+    let lon0 = view.params.lon0;
+    let (blo, bhi) = (lon0 - 180.0, lon0 + 180.0);
+    let mut runs: Vec<Vec<P>> = Vec::new();
+    let mut cur: Vec<P> = Vec::new();
+    let mut prev: Option<(f64, f64)> = None; // (longitude déroulée, latitude)
+
+    fn flush(cur: &mut Vec<P>, runs: &mut Vec<Vec<P>>) {
+        if cur.len() >= 2 {
+            runs.push(std::mem::take(cur));
+        } else {
+            cur.clear();
+        }
+    }
+
+    fn add_geo(
+        view: &View,
+        banded: bool,
+        blo: f64,
+        bhi: f64,
+        mut lo: f64,
+        la: f64,
+        cur: &mut Vec<P>,
+        runs: &mut Vec<Vec<P>>,
+        prev: &mut Option<(f64, f64)>,
+    ) {
+        // Après un franchissement de bord, la longitude de référence a changé
+        // de ±360° : suit le même décalage pour les points suivants du tracé.
+        if let Some((pl, _)) = *prev {
+            lo += 360.0 * ((pl - lo) / 360.0).round();
+        }
+        if banded {
+            // Ramène la longitude dans la bande en coupant au bord franchi.
+            let mut guard = 0;
+            while (lo > bhi || lo < blo) && guard < 8 {
+                guard += 1;
+                let right = lo > bhi;
+                let edge = if right { bhi } else { blo };
+                let shift = if right { -360.0 } else { 360.0 };
+                let edge_la = match *prev {
+                    Some((pl, pla)) if (lo - pl).abs() > 1e-12 => {
+                        pla + (la - pla) * (edge - pl) / (lo - pl)
+                    }
+                    _ => la,
+                };
+                if let Some(p) = view.project(edge, edge_la, false) {
+                    cur.push(p);
+                }
+                flush(cur, runs);
+                lo += shift;
+                if let Some(p) = view.project(if right { blo } else { bhi }, edge_la, false) {
+                    cur.push(p);
+                }
             }
         }
-        out.extend(view.pos_to_page(p));
+        if let Some(p) = view.project(lo, la, false) {
+            cur.push(p);
+        } else {
+            flush(cur, runs);
+        }
+        *prev = Some((lo, la));
     }
-    out
+
+    for (i, pos) in pts.iter().enumerate() {
+        match *pos {
+            Pos::Page { x, y } => {
+                prev = None;
+                flush(&mut cur, &mut runs);
+                cur.push([x, y]);
+            }
+            Pos::Geo { lon, lat } => {
+                let lo = match prev {
+                    Some((pl, _)) => lon + 360.0 * ((pl - lon) / 360.0).round(),
+                    None => lon0 + wrap_lon(lon - lon0),
+                };
+                if geodesic && i > 0 {
+                    if let Some((pl, pla)) = prev {
+                        let gc = great_circle((pl, pla), (lo, lat), 2.0);
+                        for &(gl, gla) in gc.iter().skip(1) {
+                            add_geo(view, banded, blo, bhi, gl, gla, &mut cur, &mut runs, &mut prev);
+                        }
+                        continue;
+                    }
+                }
+                add_geo(view, banded, blo, bhi, lo, lat, &mut cur, &mut runs, &mut prev);
+            }
+        }
+    }
+    flush(&mut cur, &mut runs);
+    runs
 }
 
 fn km_circle(view: &View, lon: f64, lat: f64, km: f64) -> Vec<P> {
@@ -509,12 +626,14 @@ pub fn item_shape(view: &View, item: &Item) -> Option<Shape> {
             (RadiusUnit::Km, Pos::Geo { lon, lat }) => Shape::Poly(km_circle(view, *lon, *lat, *radius as f64), true),
             _ => Shape::Pt(view.pos_to_page(center)?, *radius),
         },
-        Kind::Line { pts, geodesic, .. } => Shape::Poly(route(view, pts, *geodesic), false),
+        Kind::Line { pts, geodesic, .. } => {
+            Shape::Poly(route(view, pts, *geodesic).into_iter().flatten().collect(), false)
+        }
         Kind::Rect { a, b } => {
             let (a, b) = (view.pos_to_page(a)?, view.pos_to_page(b)?);
             Shape::Poly(vec![a, [b[0], a[1]], b, [a[0], b[1]]], true)
         }
-        Kind::Polygon { pts } => Shape::Poly(route(view, pts, false), true),
+        Kind::Polygon { pts } => Shape::Poly(route(view, pts, false).into_iter().flatten().collect(), true),
     })
 }
 
@@ -609,7 +728,7 @@ fn marker_prims(shape: PointShape, c: P, r: f32, fill: Option<Rgba>, stroke: Opt
     }
 }
 
-fn item_prims(view: &View, it: &Item, out: &mut Vec<Prim>) {
+fn item_prims(view: &View, it: &Item, mut out: &mut Vec<Prim>) {
     let stroke = Some(Stroke { color: it.stroke, width: it.width, dashed: it.dashed });
     let fill = if it.fill[3] > 0 { Some(it.fill) } else { None };
     let halo = Some([255, 255, 255, 210]);
@@ -669,27 +788,32 @@ fn item_prims(view: &View, it: &Item, out: &mut Vec<Prim>) {
             }
         },
         Kind::Line { pts, arrow_start, arrow_end, geodesic } => {
-            let mut line = route(view, pts, *geodesic);
-            if line.len() < 2 {
+            let mut runs: Vec<Vec<P>> = route(view, pts, *geodesic)
+                .into_iter()
+                .filter(|r| r.len() >= 2)
+                .collect();
+            if runs.is_empty() {
                 return;
             }
             let hl = (it.width * 4.5).max(12.0);
             let mut heads = Vec::new();
             if *arrow_end {
-                let n = line.len();
-                if let Some((h, short)) = arrow_head(line[n - 1], line[n - 2], hl) {
+                let n = runs.last().unwrap().len();
+                let tip = runs.last().unwrap()[n - 1];
+                let from = runs.last().unwrap()[n - 2];
+                if let Some((h, short)) = arrow_head(tip, from, hl) {
                     heads.push(h);
-                    line[n - 1] = short;
+                    runs.last_mut().unwrap()[n - 1] = short;
                 }
             }
             if *arrow_start {
-                let orig0 = line[0];
-                if let Some((h, short)) = arrow_head(orig0, line[1], hl) {
+                let first = runs.first().unwrap();
+                if let Some((h, short)) = arrow_head(first[0], first[1], hl) {
                     heads.push(h);
-                    line[0] = short;
+                    runs.first_mut().unwrap()[0] = short;
                 }
             }
-            out.push(Prim::Path { rings: vec![line], closed: false, fill: None, stroke });
+            out.push(Prim::Path { rings: runs, closed: false, fill: None, stroke });
             for h in heads {
                 out.push(Prim::Path {
                     rings: vec![h],
@@ -698,6 +822,17 @@ fn item_prims(view: &View, it: &Item, out: &mut Vec<Prim>) {
                     stroke: Some(Stroke { color: it.stroke, width: 1.0, dashed: false }),
                 });
             }
+        }
+        Kind::Polygon { pts } if pts.iter().all(|p| matches!(p, Pos::Geo { .. })) => {
+            let ring: Ring = pts
+                .iter()
+                .filter_map(|p| match p {
+                    Pos::Geo { lon, lat } => Some([*lon as f32, *lat as f32]),
+                    _ => None,
+                })
+                .collect();
+            // Découpage propre aux bords de la bande (antiméridien), comme pour les pays.
+            poly_prims(view, &Poly { rings: vec![ring] }, fill, stroke, &mut out);
         }
         Kind::Rect { .. } | Kind::Polygon { .. } => {
             if let Some(Shape::Poly(pts, _)) = item_shape(view, it) {
@@ -1026,6 +1161,92 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn lines_split_at_map_edges() {
+        let mut d = Document::default();
+        d.map.proj = Projection::Mercator;
+        d.map.center_lon = 0.0;
+        let v = View::new(&d);
+        let line = Item {
+            id: 1,
+            name: "l".into(),
+            visible: true,
+            stroke: [0, 0, 0, 255],
+            fill: [0, 0, 0, 0],
+            width: 1.0,
+            dashed: false,
+            kind: Kind::Line {
+                pts: vec![Pos::Geo { lon: 170.0, lat: 0.0 }, Pos::Geo { lon: -170.0, lat: 0.0 }],
+                arrow_start: false,
+                arrow_end: false,
+                geodesic: false,
+            },
+        };
+        for geodesic in [false, true] {
+            let mut line = line.clone();
+            if let Kind::Line { geodesic: g, .. } = &mut line.kind {
+                *g = geodesic;
+            }
+            let mut prims = Vec::new();
+            item_prims(&v, &line, &mut prims);
+            let rings: Vec<_> = prims
+                .iter()
+                .filter_map(|p| match p {
+                    Prim::Path { rings, closed: false, .. } => Some(rings.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(rings.len(), 1, "un seul tracé, en plusieurs morceaux (gc={geodesic})");
+            assert_eq!(rings[0].len(), 2, "la ligne doit être coupée à l'antiméridien (gc={geodesic})");
+            assert!(rings[0].iter().flatten().all(|p| p.iter().all(|v| v.is_finite())));
+        }
+    }
+
+    #[test]
+    fn lines_do_not_cross_hidden_hemisphere() {
+        let mut d = Document::default();
+        d.map.proj = Projection::Orthographic;
+        d.map.center_lon = 0.0;
+        d.map.center_lat = 0.0;
+        let v = View::new(&d);
+        let line = Item {
+            id: 1,
+            name: "l".into(),
+            visible: true,
+            stroke: [0, 0, 0, 255],
+            fill: [0, 0, 0, 0],
+            width: 1.0,
+            dashed: false,
+            kind: Kind::Line {
+                pts: vec![
+                    Pos::Geo { lon: -20.0, lat: 0.0 },
+                    Pos::Geo { lon: 20.0, lat: 0.0 },
+                    Pos::Geo { lon: 170.0, lat: 0.0 }, // derrière le globe
+                ],
+                arrow_start: false,
+                arrow_end: false,
+                geodesic: false,
+            },
+        };
+        let runs = route(&v, match &line.kind {
+            Kind::Line { pts, .. } => pts,
+            _ => unreachable!(),
+        }, false);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].len(), 2);
+    }
+
+    #[test]
+    fn polar_view_is_centered_on_the_pole() {
+        let mut d = Document::default();
+        d.map.proj = Projection::Polar;
+        let v = View::new(&d); // centre_lat vaut 30° : la projection doit quand même viser le pôle
+        let f = v.frame;
+        let c = v.project(d.map.center_lon, 90.0, false).unwrap();
+        assert!((c[0] - (f[0] + f[2] / 2.0)).abs() < 1e-3);
+        assert!((c[1] - (f[1] + f[3] / 2.0)).abs() < 1e-3);
     }
 
     #[test]

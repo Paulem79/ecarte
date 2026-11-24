@@ -27,11 +27,12 @@ enum Tool {
     Rect,
     Polygon,
     Capital,
+    City,
     Paint,
 }
 
 impl Tool {
-    const ALL: [(Tool, &'static str, &'static str); 12] = [
+    const ALL: [(Tool, &'static str, &'static str); 13] = [
         (Tool::Select, "⬉", "Sélection / déplacer (S)"),
         (Tool::Pan, "✋", "Déplacer la carte (molette = zoom) (H)"),
         (Tool::Text, "T", "Texte (T)"),
@@ -43,6 +44,7 @@ impl Tool {
         (Tool::Rect, "▭", "Rectangle : glisser (R)"),
         (Tool::Polygon, "⬠", "Polygone : clics, double-clic pour finir (G)"),
         (Tool::Capital, "", "Capitale d'un pays : clic sur le pays (M)"),
+        (Tool::City, "⌖", "Placer une ville (V) : recherche ou coordonnées"),
         (Tool::Paint, "🖌", "Colorier un pays (clic droit = effacer) (K)"),
     ];
 }
@@ -183,6 +185,12 @@ pub struct EcarteApp {
     cur_width: f32,
     paint_color: Rgba,
     cap_with_name: bool,
+    city_open: bool,
+    city_query: String,
+    city_manual_name: String,
+    city_lon: f64,
+    city_lat: f64,
+    city_with_name: bool,
 
     path: Option<PathBuf>,
     status: String,
@@ -226,6 +234,12 @@ impl EcarteApp {
             cur_width: 3.0,
             paint_color: [230, 160, 70, 255],
             cap_with_name: true,
+            city_open: false,
+            city_query: String::new(),
+            city_manual_name: String::new(),
+            city_lon: 0.0,
+            city_lat: 0.0,
+            city_with_name: true,
             path: None,
             status: "Prêt. Molette = zoom carte, outil ✋ = déplacer.".into(),
             fmt: Format::Png,
@@ -417,11 +431,22 @@ impl EcarteApp {
                 ui.selectable_value(&mut m.proj, p, p.label());
             }
         });
+        if m.proj.is_polar() && m.center_lat.abs() < 89.9 {
+            m.center_lat = if m.center_lat >= 0.0 { 90.0 } else { -90.0 };
+        }
         ui.horizontal(|ui| {
-            ui.label("Centre");
+            ui.label(if m.proj.is_polar() { "Méridien" } else { "Centre" });
             ui.add(egui::DragValue::new(&mut m.center_lon).speed(0.5).range(-180.0..=180.0).suffix("° lon"));
-            ui.add(egui::DragValue::new(&mut m.center_lat).speed(0.5).range(-85.0..=85.0).suffix("° lat"));
+            if m.proj.is_polar() {
+                ui.selectable_value(&mut m.center_lat, 90.0, "Pôle Nord");
+                ui.selectable_value(&mut m.center_lat, -90.0, "Pôle Sud");
+            } else {
+                ui.add(egui::DragValue::new(&mut m.center_lat).speed(0.5).range(-85.0..=85.0).suffix("° lat"));
+            }
         });
+        if m.proj.is_polar() {
+            ui.small("Projection azimutale équidistante : le monde est un disque centré sur le pôle choisi.");
+        }
         ui.horizontal(|ui| {
             ui.label("Zoom");
             ui.add(egui::Slider::new(&mut m.zoom, 0.3..=200.0).logarithmic(true));
@@ -965,7 +990,14 @@ impl EcarteApp {
                     let d = resp.drag_delta() / s;
                     let f = view.frame;
                     let c = [f[0] + f[2] / 2.0 - d.x, f[1] + f[3] / 2.0 - d.y];
-                    if let Some((lo, la)) = view.unproject(c) {
+                    if self.doc.map.proj.is_polar() {
+                        // En polaire le centre reste le pôle : on fait seulement tourner le méridien.
+                        let pole = if self.doc.map.center_lat >= 0.0 { 90.0 } else { -90.0 };
+                        if let Some((lo, _)) = view.unproject(c) {
+                            self.doc.map.center_lon = lo;
+                        }
+                        self.doc.map.center_lat = pole;
+                    } else if let Some((lo, la)) = view.unproject(c) {
                         self.doc.map.center_lon = lo;
                         self.doc.map.center_lat = la.clamp(-85.0, 85.0);
                     }
@@ -1069,6 +1101,9 @@ impl EcarteApp {
                     Tool::Capital if resp.clicked() => {
                         self.place_capital(&view, p);
                     }
+                    Tool::City if resp.double_clicked() => {
+                        self.city_open = true;
+                    }
                     Tool::Paint => {
                         if let Some((lo, la)) = view.unproject(p) {
                             if let Some(c) = self.data.base.country_at(lo, la) {
@@ -1126,6 +1161,7 @@ impl EcarteApp {
                 (egui::Key::R, Tool::Rect),
                 (egui::Key::G, Tool::Polygon),
                 (egui::Key::M, Tool::Capital),
+                (egui::Key::V, Tool::City),
                 (egui::Key::K, Tool::Paint),
             ];
             ctx.input(|i| {
@@ -1133,6 +1169,9 @@ impl EcarteApp {
                     for (k, t) in keys {
                         if i.key_pressed(k) {
                             self.tool = t;
+                            if t == Tool::City {
+                                self.city_open = true;
+                            }
                         }
                     }
                 }
@@ -1261,6 +1300,11 @@ impl eframe::App for EcarteApp {
                     if ui.button("Supprimer  Suppr").clicked() {
                         self.delete_selected();
                     }
+                    ui.separator();
+                    if ui.button("Placer une ville…  V").clicked() {
+                        self.tool = Tool::City;
+                        self.city_open = true;
+                    }
                 });
                 ui.menu_button("Aide", |ui| {
                     ui.label("E-cart-é — cartes thématiques");
@@ -1320,6 +1364,9 @@ impl eframe::App for EcarteApp {
                         if resp.on_hover_text(*tip).clicked() {
                             self.tool = *t;
                             self.draft.clear();
+                            if *t == Tool::City {
+                                self.city_open = true;
+                            }
                         }
                     }
                 });
@@ -1332,6 +1379,12 @@ impl eframe::App for EcarteApp {
                 ui.add(egui::DragValue::new(&mut self.cur_width).range(0.5..=20.0).speed(0.1).prefix("trait "));
                 if self.tool == Tool::Capital {
                     ui.checkbox(&mut self.cap_with_name, "Avec le nom");
+                }
+                if self.tool == Tool::City {
+                    ui.checkbox(&mut self.city_with_name, "Avec le nom");
+                    if ui.button("Choisir une ville…").clicked() {
+                        self.city_open = true;
+                    }
                 }
                 if self.tool == Tool::Paint {
                     ui.label("Couleur du pays");
@@ -1358,6 +1411,7 @@ impl eframe::App for EcarteApp {
         });
 
         egui::CentralPanel::default().show_inside(ui, |ui| self.canvas(ui));
+        self.city_window(&ctx);
         self.update_popup(&ctx);
 
         // suivi des modifications -> annuler/rétablir groupé + reconstruction du cache
@@ -1647,6 +1701,14 @@ fn draw_tool_icon(p: &egui::Painter, r: Rect, tool: Tool, c: Color32) {
             add(epaint::Shape::closed_line(star, st));
             p.circle_filled(r.center(), r.width() * 0.1, c);
         }
+        Tool::City => {
+            p.circle_stroke(r.center(), r.width() * 0.36, st);
+            p.line_segment([pt(0.5, 0.02), pt(0.5, 0.24)], st);
+            p.line_segment([pt(0.5, 0.76), pt(0.5, 0.98)], st);
+            p.line_segment([pt(0.02, 0.5), pt(0.24, 0.5)], st);
+            p.line_segment([pt(0.76, 0.5), pt(0.98, 0.5)], st);
+            p.circle_filled(r.center(), r.width() * 0.09, c);
+        }
         Tool::Paint => {
             p.line_segment([pt(0.95, 0.05), pt(0.45, 0.55)], epaint::Stroke::new(3.0, c));
             add(epaint::Shape::convex_polygon(vec![pt(0.5, 0.45), pt(0.6, 0.6), pt(0.1, 0.98), pt(0.02, 0.88)], c, epaint::Stroke::NONE));
@@ -1687,6 +1749,94 @@ impl EcarteApp {
         }
         self.selected = Some(id);
         self.status = format!("{} (capitale de {cname})", cap.name_fr);
+    }
+}
+
+impl EcarteApp {
+    /// Fenêtre de recherche et de placement de villes (outil V).
+    fn city_window(&mut self, ctx: &egui::Context) {
+        if !self.city_open {
+            return;
+        }
+        let mut open = true;
+        let mut place: Option<(String, f64, f64)> = None;
+        egui::Window::new("Placer une ville")
+            .open(&mut open)
+            .resizable(true)
+            .default_size(Vec2::new(430.0, 440.0))
+            .show(ctx, |ui| {
+                ui.label("Villes intégrées (nom, pays) — un clic place le point :");
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.city_query).hint_text("Paris, Londres, France…"));
+                    if ui.button("Effacer").clicked() {
+                        self.city_query.clear();
+                    }
+                });
+                let found = data::search_cities(&self.city_query, 60);
+                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                    if found.is_empty() {
+                        ui.label("Aucune ville trouvée.");
+                    }
+                    for c in &found {
+                        let label = if c.name_fr == c.name {
+                            format!("{} — {}", c.name, c.country)
+                        } else {
+                            format!("{} ({}) — {}", c.name_fr, c.name, c.country)
+                        };
+                        if ui.button(label).clicked() {
+                            place = Some((c.name_fr.clone(), c.lon, c.lat));
+                        }
+                    }
+                });
+                ui.separator();
+                ui.label("Autre ville : saisissez son nom et ses coordonnées.");
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.city_manual_name).hint_text("Nom").desired_width(160.0));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("lon");
+                    ui.add(egui::DragValue::new(&mut self.city_lon).speed(0.1).range(-180.0..=180.0));
+                    ui.label("lat");
+                    ui.add(egui::DragValue::new(&mut self.city_lat).speed(0.1).range(-90.0..=90.0));
+                });
+                ui.checkbox(&mut self.city_with_name, "Avec le nom");
+                if ui.button("Placer ce point").clicked() {
+                    let name = if self.city_manual_name.trim().is_empty() {
+                        "Ville".to_string()
+                    } else {
+                        self.city_manual_name.trim().to_string()
+                    };
+                    place = Some((name, self.city_lon, self.city_lat));
+                }
+            });
+        self.city_open = open;
+        if let Some((name, lon, lat)) = place {
+            self.place_city(&name, lon, lat);
+        }
+    }
+
+    /// Ajoute un point de ville, modifiable ensuite comme n'importe quel élément.
+    fn place_city(&mut self, name: &str, lon: f64, lat: f64) {
+        let label = if self.city_with_name { name.to_string() } else { String::new() };
+        let id = self.doc.add_item(
+            "Ville",
+            [255, 255, 255, 255],
+            self.cur_stroke,
+            1.5,
+            Kind::Point {
+                pos: Pos::Geo { lon, lat },
+                radius: 6.0,
+                shape: PointShape::Circle,
+                label,
+                label_size: 16.0,
+            },
+        );
+        if let Some(it) = self.doc.item_mut(id) {
+            it.name = format!("Ville : {name}");
+        }
+        self.selected = Some(id);
+        self.tab = Tab::Items;
+        self.status = format!("{name} placée ({lon:.3}° lon, {lat:.3}° lat)");
     }
 }
 

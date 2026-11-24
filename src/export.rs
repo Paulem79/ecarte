@@ -126,6 +126,11 @@ mod manual {
         d.map.center_lat = 0.0;
         export(&d, &data, std::path::Path::new(&format!("{out}/c.jpg")), Format::Jpg, 96.0, 85).unwrap();
         export(&d, &data, std::path::Path::new(&format!("{out}/c.svg")), Format::Svg, 96.0, 85).unwrap();
+        d.map.proj = crate::geo::Projection::Polar;
+        d.map.center_lat = 90.0;
+        export(&d, &data, std::path::Path::new(&format!("{out}/polar.png")), Format::Png, 96.0, 90).unwrap();
+        d.map.center_lat = -90.0;
+        export(&d, &data, std::path::Path::new(&format!("{out}/polar_s.png")), Format::Png, 96.0, 90).unwrap();
     }
 }
 

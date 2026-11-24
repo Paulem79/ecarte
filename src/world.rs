@@ -223,3 +223,73 @@ pub fn capitals_from_geojson(text: &str) -> Vec<Capital> {
     }
     out
 }
+
+/// Ville (Natural Earth, points « populated places »).
+#[derive(Clone, Debug, PartialEq)]
+pub struct City {
+    pub name: String,
+    pub name_fr: String,
+    pub country: String,
+    pub iso: String,
+    pub lon: f64,
+    pub lat: f64,
+    pub pop: f64,
+    pub capital: bool,
+}
+
+/// Lecture des villes d'un GeoJSON de points (Natural Earth `populated_places`).
+pub fn cities_from_geojson(text: &str) -> Vec<City> {
+    let Ok(root) = serde_json::from_str::<Value>(text) else { return vec![] };
+    let Some(feats) = root.get("features").and_then(|f| f.as_array()) else { return vec![] };
+    let mut out = Vec::new();
+    for f in feats {
+        let Some(props) = f.get("properties") else { continue };
+        let s = |k: &str| props.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let Some(c) = f.get("geometry").and_then(|g| g.get("coordinates")).and_then(|c| c.as_array()) else { continue };
+        let (Some(lon), Some(lat)) = (c.first().and_then(|v| v.as_f64()), c.get(1).and_then(|v| v.as_f64())) else { continue };
+        let name = s("NAME");
+        if name.is_empty() {
+            continue;
+        }
+        let name_fr = if s("NAME_FR").is_empty() { name.clone() } else { s("NAME_FR") };
+        let country = if s("ADM0NAME").is_empty() { s("SOV0NAME") } else { s("ADM0NAME") };
+        out.push(City {
+            name,
+            name_fr,
+            country,
+            iso: s("ADM0_A3"),
+            lon,
+            lat,
+            pop: props.get("POP_MAX").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            capital: s("FEATURECLA").contains("capital"),
+        });
+    }
+    out
+}
+
+/// Comparaison insensible à la casse et aux accents (recherche de villes).
+pub fn fold_text(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| c.to_lowercase())
+        .map(|c| match c {
+            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => 'a',
+            'ç' | 'ć' | 'č' | 'ĉ' => 'c',
+            'ď' | 'đ' => 'd',
+            'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ę' | 'ě' => 'e',
+            'ğ' | 'ĝ' | 'ġ' => 'g',
+            'ì' | 'í' | 'î' | 'ï' | 'ī' | 'į' => 'i',
+            'ĺ' | 'ľ' | 'ł' => 'l',
+            'ñ' | 'ń' | 'ň' => 'n',
+            'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' => 'o',
+            'ŕ' | 'ř' => 'r',
+            'ś' | 'š' | 'ş' | 'ŝ' => 's',
+            'ť' | 'ţ' => 't',
+            'ù' | 'ú' | 'û' | 'ü' | 'ū' | 'ů' => 'u',
+            'ý' | 'ÿ' | 'ŷ' => 'y',
+            'ź' | 'ż' | 'ž' => 'z',
+            'æ' => 'a',
+            'œ' => 'o',
+            _ => c,
+        })
+        .collect()
+}
